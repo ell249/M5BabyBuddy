@@ -99,17 +99,15 @@ void UI::drawHeader(const char* name, bool wifiOk, int offlineCount) {
     _sprite->clear();
     _big(TEXT_LEFT, 2, name);
 
-    // Small indicator top-right — use small font so it fits alongside long names
+    _hline(HEADER_H - 2);
+
+    // Small indicator bottom-left
     char ind[6];
     if (!wifiOk && offlineCount > 0)
         snprintf(ind, sizeof(ind), "Q%d", offlineCount);
     else
         snprintf(ind, sizeof(ind), "%s", wifiOk ? "W" : "X");
-
-    int rx = DISPLAY_W - _smallWidth(ind) - 3;
-    _small(rx, 6, ind);
-
-    _hline(HEADER_H - 2);
+    _small(TEXT_LEFT, DISPLAY_H - SMALL_H - 2, ind);
 }
 
 // ── Menu — one item per page ──────────────────────────────────────────────────
