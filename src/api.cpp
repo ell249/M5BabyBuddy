@@ -1,0 +1,436 @@
+#include "api.h"
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+#include <Preferences.h>
+
+BabyBuddyAPI api;
+
+// Offline queue stored as indexed NVS keys to avoid JSON serialisation issues.
+// Keys: "count", "m0","p0","b0", "m1","p1","b1", ...
+static const char NVS_QUEUE_NS[] = "bb_queue";
+static const char NVS_CHILD_NS[] = "bb_child";
+static const char NVS_CHILD_KEY[]= "id";
+static const int  OFFLINE_MAX    = 20;
+
+static bool _isHttps(const char* url) {
+    return strncmp(url, "https://", 8) == 0;
+}
+
+void BabyBuddyAPI::begin(const char* baseUrl, const char* token) {
+    strncpy(_baseUrl, baseUrl, sizeof(_baseUrl) - 1);
+    strncpy(_token,   token,   sizeof(_token)   - 1);
+    snprintf(_authHeader, sizeof(_authHeader), "Token %s", token);
+    _childName[0] = '\0';
+
+    // Load cached child name from NVS
+    Preferences p;
+    p.begin(NVS_CHILD_NS, true);
+    p.getString("name", _childName, sizeof(_childName));
+    p.end();
+}
+
+void BabyBuddyAPI::_isoTime(time_t t, char* buf, size_t len) {
+    struct tm* tm = localtime(&t);
+    strftime(buf, len, "%Y-%m-%dT%H:%M:%S", tm);
+}
+
+void BabyBuddyAPI::_formatDuration(time_t start, time_t end, char* buf, size_t len) {
+    uint32_t sec = (uint32_t)(end - start);
+    uint32_t h = sec / 3600;
+    uint32_t m = (sec % 3600) / 60;
+    if (h > 0) snprintf(buf, len, "%uh%02um", (unsigned)h, (unsigned)m);
+    else        snprintf(buf, len, "%um",       (unsigned)m);
+}
+
+// ── HTTP helpers ──────────────────────────────────────────────────────────────
+
+String BabyBuddyAPI::_get(const char* path, int& httpCode) {
+    char url[160];
+    snprintf(url, sizeof(url), "%s%s", _baseUrl, path);
+
+    HTTPClient http;
+    if (_isHttps(url)) {
+        WiFiClientSecure* client = new WiFiClientSecure();
+        client->setInsecure();  // skip cert verification for home server
+        http.begin(*client, url);
+        http.addHeader("Authorization", _authHeader);
+        http.addHeader("Content-Type", "application/json");
+        httpCode = http.GET();
+        String body = (httpCode > 0) ? http.getString() : "";
+        http.end();
+        delete client;
+        return body;
+    } else {
+        http.begin(url);
+        http.addHeader("Authorization", _authHeader);
+        http.addHeader("Content-Type", "application/json");
+        httpCode = http.GET();
+        String body = (httpCode > 0) ? http.getString() : "";
+        http.end();
+        return body;
+    }
+}
+
+BBResult BabyBuddyAPI::_post(const char* path, const char* body) {
+    char url[160];
+    snprintf(url, sizeof(url), "%s%s", _baseUrl, path);
+
+    BBResult r; r.error[0] = '\0';
+
+    HTTPClient http;
+    auto _do = [&](HTTPClient& h) {
+        h.addHeader("Authorization", _authHeader);
+        h.addHeader("Content-Type", "application/json");
+        r.httpCode = h.POST((uint8_t*)body, strlen(body));
+        r.ok = (r.httpCode == 200 || r.httpCode == 201);
+        if (!r.ok) {
+            strncpy(r.error, h.getString().c_str(), sizeof(r.error) - 1);
+        }
+        h.end();
+    };
+
+    if (_isHttps(url)) {
+        WiFiClientSecure* client = new WiFiClientSecure();
+        client->setInsecure();
+        http.begin(*client, url);
+        _do(http);
+        delete client;
+    } else {
+        http.begin(url);
+        _do(http);
+    }
+    return r;
+}
+
+BBResult BabyBuddyAPI::_del(const char* path) {
+    char url[160];
+    snprintf(url, sizeof(url), "%s%s", _baseUrl, path);
+
+    BBResult r; r.error[0] = '\0';
+
+    HTTPClient http;
+    auto _do = [&](HTTPClient& h) {
+        h.addHeader("Authorization", _authHeader);
+        r.httpCode = h.sendRequest("DELETE");
+        r.ok = (r.httpCode == 204 || r.httpCode == 200);
+        if (!r.ok) strncpy(r.error, h.getString().c_str(), sizeof(r.error)-1);
+        h.end();
+    };
+
+    if (_isHttps(url)) {
+        WiFiClientSecure* client = new WiFiClientSecure();
+        client->setInsecure();
+        http.begin(*client, url);
+        _do(http);
+        delete client;
+    } else {
+        http.begin(url);
+        _do(http);
+    }
+    return r;
+}
+
+// ── Child info ────────────────────────────────────────────────────────────────
+
+void BabyBuddyAPI::fetchChildName(int childId) {
+    int code;
+    String body = _get("/api/children/", code);
+    if (code != 200 || body.isEmpty()) return;
+
+    JsonDocument doc;
+    if (deserializeJson(doc, body) != DeserializationError::Ok) return;
+    JsonArray results = doc["results"].as<JsonArray>();
+    for (JsonObject child : results) {
+        if ((int)(child["id"] | -1) == childId) {
+            const char* name = child["first_name"] | "";
+            strncpy(_childName, name, sizeof(_childName) - 1);
+            Preferences p;
+            p.begin(NVS_CHILD_NS, false);
+            p.putString("name", _childName);
+            p.end();
+            return;
+        }
+    }
+}
+
+// ── Child ID ──────────────────────────────────────────────────────────────────
+
+int BabyBuddyAPI::getChildId() {
+    Preferences prefs;
+    prefs.begin(NVS_CHILD_NS, true);
+    int cached = prefs.getInt(NVS_CHILD_KEY, 0);
+    prefs.end();
+    if (cached > 0) return cached;
+
+    int code;
+    String body = _get("/api/children/", code);
+    if (code != 200 || body.isEmpty()) return -1;
+
+    JsonDocument doc;
+    if (deserializeJson(doc, body) != DeserializationError::Ok) return -1;
+    JsonArray results = doc["results"].as<JsonArray>();
+    if (results.size() == 0) return -1;
+
+    int id = results[0]["id"] | -1;
+    if (id > 0) {
+        prefs.begin(NVS_CHILD_NS, false);
+        prefs.putInt(NVS_CHILD_KEY, id);
+        prefs.end();
+    }
+    return id;
+}
+
+// ── Timer management ──────────────────────────────────────────────────────────
+
+BBTimer BabyBuddyAPI::getActiveTimer(const char* name) {
+    BBTimer t; t.id = -1; t.start = 0; t.name[0] = '\0';
+    char path[80];
+    snprintf(path, sizeof(path), "/api/timers/?name=%s", name);
+    int code;
+    String body = _get(path, code);
+    if (code != 200 || body.isEmpty()) return t;
+
+    JsonDocument doc;
+    if (deserializeJson(doc, body) != DeserializationError::Ok) return t;
+    JsonArray results = doc["results"].as<JsonArray>();
+    if (results.size() == 0) return t;
+
+    t.id = results[0]["id"] | -1;
+    strncpy(t.name, name, sizeof(t.name) - 1);
+    const char* startStr = results[0]["start"] | "";
+    struct tm tm = {};
+    if (sscanf(startStr, "%d-%d-%dT%d:%d:%d",
+               &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
+               &tm.tm_hour, &tm.tm_min, &tm.tm_sec) == 6) {
+        tm.tm_year -= 1900; tm.tm_mon -= 1;
+        t.start = mktime(&tm);
+    }
+    return t;
+}
+
+BBResult BabyBuddyAPI::startTimer(const char* name, int childId, BBTimer& out) {
+    char startBuf[24]; _isoTime(time(nullptr), startBuf, sizeof(startBuf));
+    char body[128];
+    snprintf(body, sizeof(body),
+             "{\"child\":%d,\"name\":\"%s\",\"start\":\"%s\"}",
+             childId, name, startBuf);
+
+    BBResult r = _post("/api/timers/", body);
+    if (r.ok) out = getActiveTimer(name);
+    else      out.id = -1;
+    return r;
+}
+
+BBResult BabyBuddyAPI::stopTimer(int timerId) {
+    char path[32];
+    snprintf(path, sizeof(path), "/api/timers/%d/", timerId);
+    return _del(path);
+}
+
+// ── Activity logging ──────────────────────────────────────────────────────────
+
+BBResult BabyBuddyAPI::logFeeding(int child, time_t start, time_t end,
+                                   const char* method) {
+    char s[24], e[24];
+    _isoTime(start, s, sizeof(s)); _isoTime(end, e, sizeof(e));
+    const char* type = "br";
+    if (strcmp(method,"f")==0) type="fo";
+    else if (strcmp(method,"s")==0) type="so";
+    char body[256];
+    snprintf(body, sizeof(body),
+             "{\"child\":%d,\"start\":\"%s\",\"end\":\"%s\","
+             "\"method\":\"%s\",\"type\":\"%s\"}", child, s, e, method, type);
+    return _post("/api/feedings/", body);
+}
+
+BBResult BabyBuddyAPI::logDiaper(int child, time_t when, bool wet, bool solid) {
+    char t[24]; _isoTime(when, t, sizeof(t));
+    char body[128];
+    snprintf(body, sizeof(body),
+             "{\"child\":%d,\"time\":\"%s\",\"wet\":%s,\"solid\":%s}",
+             child, t, wet?"true":"false", solid?"true":"false");
+    return _post("/api/changes/", body);
+}
+
+BBResult BabyBuddyAPI::logSleep(int child, time_t start, time_t end) {
+    char s[24], e[24]; _isoTime(start,s,sizeof(s)); _isoTime(end,e,sizeof(e));
+    char body[128];
+    snprintf(body,sizeof(body),
+             "{\"child\":%d,\"start\":\"%s\",\"end\":\"%s\"}", child,s,e);
+    return _post("/api/sleep/", body);
+}
+
+BBResult BabyBuddyAPI::logTummyTime(int child, time_t start, time_t end) {
+    char s[24], e[24]; _isoTime(start,s,sizeof(s)); _isoTime(end,e,sizeof(e));
+    char body[128];
+    snprintf(body,sizeof(body),
+             "{\"child\":%d,\"start\":\"%s\",\"end\":\"%s\"}", child,s,e);
+    return _post("/api/tummy-times/", body);
+}
+
+BBResult BabyBuddyAPI::logPumping(int child, time_t start, time_t end,
+                                   float amountMl) {
+    char s[24], e[24]; _isoTime(start,s,sizeof(s)); _isoTime(end,e,sizeof(e));
+    char body[192];
+    snprintf(body,sizeof(body),
+             "{\"child\":%d,\"start\":\"%s\",\"end\":\"%s\",\"amount\":%.1f}",
+             child, s, e, amountMl);
+    return _post("/api/pumping/", body);
+}
+
+// ── Recent records for summary screen ────────────────────────────────────────
+
+bool BabyBuddyAPI::getRecentRecords(BBRecentRecord records[3]) {
+    struct { const char* path; const char* type; int idx; } queries[] = {
+        { "/api/feedings/?limit=1",  "Feed",  0 },
+        { "/api/changes/?limit=1",   "Diap",  1 },
+        { "/api/sleep/?limit=1",     "Sleep", 2 },
+    };
+    bool anyOk = false;
+
+    for (auto& q : queries) {
+        int code;
+        String body = _get(q.path, code);
+        BBRecentRecord& r = records[q.idx];
+        strncpy(r.type, q.type, sizeof(r.type)-1);
+        r.timeStr[0] = '\0'; r.detail[0] = '\0';
+        if (code != 200 || body.isEmpty()) continue;
+
+        JsonDocument doc;
+        if (deserializeJson(doc, body) != DeserializationError::Ok) continue;
+        JsonArray results = doc["results"].as<JsonArray>();
+        if (results.size() == 0) continue;
+
+        anyOk = true;
+        JsonObject entry = results[0].as<JsonObject>();
+
+        // Parse time (try "start", fallback "time")
+        const char* startStr = entry["start"] | entry["time"] | "";
+        if (strlen(startStr) >= 16) {
+            int h, mi;
+            if (sscanf(startStr + 11, "%d:%d", &h, &mi) == 2)
+                snprintf(r.timeStr, sizeof(r.timeStr), "%02d:%02d", h, mi);
+        }
+
+        if (q.idx == 0) {  // Feeding
+            const char* method = entry["method"] | "?";
+            const char* endStr = entry["end"] | startStr;
+            struct tm tmS={}, tmE={};
+            sscanf(startStr,"%d-%d-%dT%d:%d:%d",
+                   &tmS.tm_year,&tmS.tm_mon,&tmS.tm_mday,
+                   &tmS.tm_hour,&tmS.tm_min,&tmS.tm_sec);
+            sscanf(endStr,"%d-%d-%dT%d:%d:%d",
+                   &tmE.tm_year,&tmE.tm_mon,&tmE.tm_mday,
+                   &tmE.tm_hour,&tmE.tm_min,&tmE.tm_sec);
+            tmS.tm_year-=1900; tmS.tm_mon-=1;
+            tmE.tm_year-=1900; tmE.tm_mon-=1;
+            char dur[12];
+            _formatDuration(mktime(&tmS), mktime(&tmE), dur, sizeof(dur));
+            const char* mname="?";
+            if (strcmp(method,"bl")==0)      mname="Left";
+            else if (strcmp(method,"br")==0) mname="Right";
+            else if (strcmp(method,"bo")==0) mname="Both";
+            else if (strcmp(method,"f")==0)  mname="Formula";
+            else if (strcmp(method,"p")==0)  mname="Pumped";
+            snprintf(r.detail, sizeof(r.detail), "%s  %s", dur, mname);
+        } else if (q.idx == 1) {  // Diaper
+            bool wet   = entry["wet"]   | false;
+            bool solid = entry["solid"] | false;
+            if (wet && solid)   strncpy(r.detail, "Wet + Dirty", sizeof(r.detail)-1);
+            else if (wet)       strncpy(r.detail, "Wet",         sizeof(r.detail)-1);
+            else if (solid)     strncpy(r.detail, "Dirty",       sizeof(r.detail)-1);
+            else                strncpy(r.detail, "Dry",         sizeof(r.detail)-1);
+        } else {  // Sleep
+            const char* endStr = entry["end"] | startStr;
+            struct tm tmS={}, tmE={};
+            sscanf(startStr,"%d-%d-%dT%d:%d:%d",
+                   &tmS.tm_year,&tmS.tm_mon,&tmS.tm_mday,
+                   &tmS.tm_hour,&tmS.tm_min,&tmS.tm_sec);
+            sscanf(endStr,"%d-%d-%dT%d:%d:%d",
+                   &tmE.tm_year,&tmE.tm_mon,&tmE.tm_mday,
+                   &tmE.tm_hour,&tmE.tm_min,&tmE.tm_sec);
+            tmS.tm_year-=1900; tmS.tm_mon-=1;
+            tmE.tm_year-=1900; tmE.tm_mon-=1;
+            _formatDuration(mktime(&tmS), mktime(&tmE), r.detail, sizeof(r.detail));
+        }
+    }
+    return anyOk;
+}
+
+// ── Offline queue (NVS indexed keys — avoids JSON-in-JSON complexity) ─────────
+// Keys: "count" (int), "m0","p0","b0", "m1","p1","b1", ...
+
+void BabyBuddyAPI::enqueueOffline(const char* method, const char* endpoint,
+                                   const char* body) {
+    Preferences p;
+    p.begin(NVS_QUEUE_NS, false);
+    int n = p.getInt("count", 0);
+    if (n >= OFFLINE_MAX) { p.end(); return; }
+
+    char km[5], kp[5], kb[5];
+    snprintf(km, sizeof(km), "m%d", n);
+    snprintf(kp, sizeof(kp), "p%d", n);
+    snprintf(kb, sizeof(kb), "b%d", n);
+    p.putString(km, method);
+    p.putString(kp, endpoint);
+    p.putString(kb, body);
+    p.putInt("count", n + 1);
+    p.end();
+}
+
+int BabyBuddyAPI::offlineCount() {
+    Preferences p;
+    p.begin(NVS_QUEUE_NS, true);
+    int n = p.getInt("count", 0);
+    p.end();
+    return n;
+}
+
+int BabyBuddyAPI::replayOffline() {
+    Preferences p;
+    p.begin(NVS_QUEUE_NS, false);
+    int n = p.getInt("count", 0);
+
+    // Load all events first
+    struct Event { char m[8]; char path[80]; char body[256]; };
+    int replayed = 0;
+    int remaining = 0;
+    Event* events = new Event[n];
+
+    for (int i = 0; i < n; i++) {
+        char km[5], kp[5], kb[5];
+        snprintf(km,sizeof(km),"m%d",i);
+        snprintf(kp,sizeof(kp),"p%d",i);
+        snprintf(kb,sizeof(kb),"b%d",i);
+        p.getString(km, events[i].m,    sizeof(events[i].m));
+        p.getString(kp, events[i].path, sizeof(events[i].path));
+        p.getString(kb, events[i].body, sizeof(events[i].body));
+    }
+    p.clear();
+
+    // Replay each event; failed ones go back into NVS
+    for (int i = 0; i < n; i++) {
+        BBResult r;
+        if (strcmp(events[i].m, "DELETE") == 0) r = _del(events[i].path);
+        else                                     r = _post(events[i].path, events[i].body);
+
+        if (r.ok) {
+            replayed++;
+        } else {
+            // Re-enqueue failed event
+            char km[5], kp[5], kb[5];
+            snprintf(km,sizeof(km),"m%d",remaining);
+            snprintf(kp,sizeof(kp),"p%d",remaining);
+            snprintf(kb,sizeof(kb),"b%d",remaining);
+            p.putString(km, events[i].m);
+            p.putString(kp, events[i].path);
+            p.putString(kb, events[i].body);
+            remaining++;
+        }
+    }
+    p.putInt("count", remaining);
+    p.end();
+    delete[] events;
+    return replayed;
+}
