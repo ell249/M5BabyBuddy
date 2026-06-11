@@ -97,7 +97,7 @@ void UI::_formatElapsed(uint32_t sec, char* buf, size_t len) {
 
 void UI::drawHeader(const char* name, bool wifiOk, int offlineCount) {
     _sprite->clear();
-    _big(TEXT_LEFT, 2, name);
+    _small(TEXT_LEFT, 8, name);
 
     _hline(HEADER_H - 2);
 
@@ -201,8 +201,8 @@ void UI::drawSummary(const char* babyName, const char* clockStr,
     if (!_sprite) return;
     _sprite->clear();
 
-    // Header: baby name (18pt) left, clock (12pt) right — small font avoids overlap
-    _big(TEXT_LEFT, 2, babyName);
+    // Header: both name and clock in small font so they never overlap
+    _small(TEXT_LEFT, 8, babyName);
     int cw = _smallWidth(clockStr);
     _small(DISPLAY_W - cw - TEXT_LEFT, 8, clockStr);
     _hline(HEADER_H - 2);
