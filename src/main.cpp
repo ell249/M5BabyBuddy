@@ -121,6 +121,8 @@ static bool          _diaperSolid    = false;
 static char          _errorMsg[80]   = "";
 static unsigned long _lastActivityMs = 0;
 static unsigned long _timerRefreshMs = 0;
+static bool          _wifiPending    = false;
+static unsigned long _wifiStartMs    = 0;
 
 // ── Menu definitions (≤8 chars per item for AsciiFont24x48) ──────────────────
 static const char* MAIN_ITEMS[] = {
@@ -256,9 +258,43 @@ static void syncRtcFromSystem() {
     M5.Rtc.SetDate(&ds);
 }
 
+// ── Async WiFi ────────────────────────────────────────────────────────────────
+
+static void startWiFiAsync() {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    _wifiPending = true;
+    _wifiStartMs = millis();
+}
+
+// Called from loop() the first time WiFi becomes connected
+static void onWiFiConnected() {
+    _wifiOk = true;
+    // NTP has been running since configTzTime() at boot; usually syncs within 1s of WiFi up
+    if (waitNtp(3000)) syncRtcFromSystem();
+    if (api.offlineCount() > 0) api.replayOffline();
+    // Fetch child info from API only if not already cached in NVS
+    if (_childId <= 0) {
+        _childId = api.getChildId();
+        if (_childId > 0) {
+            api.fetchChildName(_childId);
+            strncpy(_childName, api.getChildName(), sizeof(_childName) - 1);
+            if (_childName[0] == '\0') strncpy(_childName, "Baby", sizeof(_childName));
+        }
+    }
+    // Refresh whichever screen shows the WiFi indicator
+    if (_state == ST_MAIN_MENU) {
+        display.drawMenu(_childName, MAIN_ITEMS, MAIN_COUNT, _menuSel,
+                         _wifiOk, api.offlineCount());
+        display.refresh(true);
+        touch();
+    }
+}
+
 // ── Deep sleep with summary screen ───────────────────────────────────────────
 static void goToSleep() {
     _state = ST_SLEEPING;
+    if (_wifiPending) { WiFi.disconnect(true); _wifiPending = false; }
 
     // Give immediate visual feedback before potentially-slow API calls
     display.drawStatus("...");
@@ -380,12 +416,12 @@ static void handleBoot() {
     for (int i = 0; i < MEDICINE_COUNT; i++) _medicationPtrs[i] = MEDICINE_NAMES[i];
     _medicationPtrs[MEDICINE_COUNT] = "Back";
 
-    // Set TZ first so mktime() in syncSystemFromRtc() uses the correct local offset.
+    // TZ must be set before syncSystemFromRtc so mktime() uses the correct local offset.
     // configTzTime also starts the SNTP daemon; it will sync once WiFi is up.
     configTzTime(BB_TIMEZONE, NTP_SERVER);
     syncSystemFromRtc();  // clock is immediately correct from RTC, even without WiFi
 
-    // Silent 5-minute refresh — skip the connecting screen entirely
+    // Timer wakeup: silent background refresh — blocking WiFi is fine, user isn't watching
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
         api.begin(BB_BASE_URL, BB_AUTH_TOKEN);
         const char* cached = api.getChildName();
@@ -397,30 +433,14 @@ static void handleBoot() {
         return;
     }
 
-    _wifiOk = connectWiFi(true);   // dots via partial refresh — no full-screen flash
+    // Normal (button) wakeup: load from NVS and show UI immediately — no waiting for WiFi
     api.begin(BB_BASE_URL, BB_AUTH_TOKEN);
+    _childId = BB_CHILD_ID > 0 ? BB_CHILD_ID : api.getChildId();  // NVS read, no network
+    const char* cached = api.getChildName();
+    if (cached[0] != '\0') strncpy(_childName, cached, sizeof(_childName) - 1);
+    if (_childName[0] == '\0') strncpy(_childName, "Baby", sizeof(_childName));
 
-    if (_wifiOk) {
-        if (waitNtp(10000)) syncRtcFromSystem();
-
-        int q = api.offlineCount();
-        if (q > 0) {
-            display.drawProgress("Syncing...", 0, q);
-            display.refresh();
-            api.replayOffline();
-        }
-        _childId = BB_CHILD_ID > 0 ? BB_CHILD_ID : api.getChildId();
-        if (_childId > 0) {
-            api.fetchChildName(_childId);
-            strncpy(_childName, api.getChildName(), sizeof(_childName) - 1);
-            if (_childName[0] == '\0') strncpy(_childName, "Baby", sizeof(_childName));
-        }
-    } else {
-        _childId = BB_CHILD_ID > 0 ? BB_CHILD_ID : -1;
-        // Use cached name loaded from NVS in api.begin()
-        const char* cached = api.getChildName();
-        if (cached[0] != '\0') strncpy(_childName, cached, sizeof(_childName) - 1);
-    }
+    startWiFiAsync();  // connect in background; onWiFiConnected() fires from loop()
 
     loadTimer();
     if (_timer.valid) {
@@ -820,9 +840,20 @@ void setup() {
 }
 
 void loop() {
+    // Background WiFi — poll until connected or timed out
+    if (_wifiPending) {
+        if (WiFi.status() == WL_CONNECTED) {
+            _wifiPending = false;
+            onWiFiConnected();
+        } else if (millis() - _wifiStartMs > 30000UL) {
+            _wifiPending = false;
+            WiFi.disconnect(true);  // give up; _wifiOk stays false
+        }
+    }
+
     BtnEvent btn = readButton();
 
-    // G5 (EXT) button — go to sleep screen from anywhere
+    // PWR button — go to sleep screen from anywhere
     if (btn == BTN_EXT) { goToSleep(); return; }
 
     switch (_state) {
