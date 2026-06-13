@@ -429,10 +429,10 @@ int BabyBuddyAPI::getRecentRecords(BBRecentRecord records[3], int childId) {
         } else if (strcmp(queries[qi].type, "Diap") == 0) {
             bool wet   = entry["wet"]   | false;
             bool solid = entry["solid"] | false;
-            if      (wet && solid) strncpy(r.detail, "Wet+Dirty", sizeof(r.detail) - 1);
-            else if (wet)          strncpy(r.detail, "Wet",       sizeof(r.detail) - 1);
-            else if (solid)        strncpy(r.detail, "Dirty",     sizeof(r.detail) - 1);
-            else                   strncpy(r.detail, "Dry",       sizeof(r.detail) - 1);
+            if      (wet && solid) { strncpy(r.detail, "Wet+Dirty", sizeof(r.detail)-1); strncpy(r.method, "W+P", sizeof(r.method)-1); }
+            else if (wet)          { strncpy(r.detail, "Wet",       sizeof(r.detail)-1); strncpy(r.method, "W",   sizeof(r.method)-1); }
+            else if (solid)        { strncpy(r.detail, "Dirty",     sizeof(r.detail)-1); strncpy(r.method, "P",   sizeof(r.method)-1); }
+            else                   { strncpy(r.detail, "Dry",       sizeof(r.detail)-1); strncpy(r.method, "D",   sizeof(r.method)-1); }
 
         } else if (strcmp(queries[qi].type, "Pump") == 0) {
             float amount = entry["amount"] | 0.0f;
@@ -448,10 +448,13 @@ int BabyBuddyAPI::getRecentRecords(BBRecentRecord records[3], int childId) {
             tmE.tm_year -= 1900; tmE.tm_mon -= 1;
             char dur[12];
             _formatDuration(mktime(&tmS), mktime(&tmE), dur, sizeof(dur));
-            if (amount > 0.0f)
-                snprintf(r.detail, sizeof(r.detail), "%s  %.0fml", dur, amount);
-            else
+            if (amount > 0.0f) {
+                snprintf(r.detail,  sizeof(r.detail),  "%s  %.0fml", dur, amount);
+                snprintf(r.method,  sizeof(r.method),  "%.0fml", amount);
+            } else {
                 strncpy(r.detail, dur, sizeof(r.detail) - 1);
+                strncpy(r.method, dur, sizeof(r.method) - 1);
+            }
 
         } else if (strcmp(queries[qi].type, "Meds") == 0) {
             const char* name = entry["name"] | "";
@@ -461,6 +464,7 @@ int BabyBuddyAPI::getRecentRecords(BBRecentRecord records[3], int childId) {
                 snprintf(r.detail, sizeof(r.detail), "%s %.1f%s", name, dosage, unit);
             else
                 strncpy(r.detail, name, sizeof(r.detail) - 1);
+            strncpy(r.method, name, sizeof(r.method) - 1);  // up to 7 chars of med name
 
         } else if (strcmp(queries[qi].type, "Temp") == 0) {
             float temp = entry["temperature"] | 0.0f;
@@ -482,6 +486,7 @@ int BabyBuddyAPI::getRecentRecords(BBRecentRecord records[3], int childId) {
             tmS.tm_year -= 1900; tmS.tm_mon -= 1;
             tmE.tm_year -= 1900; tmE.tm_mon -= 1;
             _formatDuration(mktime(&tmS), mktime(&tmE), r.detail, sizeof(r.detail));
+            strncpy(r.method, r.detail, sizeof(r.method) - 1);  // same compact string
         }
 
         count++;
