@@ -4,6 +4,8 @@ A [Baby Buddy](https://github.com/babybuddy/babybuddy) remote input device for t
 
 Inspired by [babypod-software](https://github.com/skjdghsdjgsdj/babypod-software).
 
+[![Buy Me A Coffee](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://buymeacoffee.com/ell249)
+
 ## Features
 
 ### Activity logging
