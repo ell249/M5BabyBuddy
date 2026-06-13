@@ -3,7 +3,11 @@
 #include <WiFi.h>
 #include <Preferences.h>
 #include <time.h>
+#include <sys/time.h>
 #include <esp_sleep.h>
+#include <esp_sntp.h>
+#include <driver/adc.h>
+#include <esp_adc_cal.h>
 
 #include "config.h"
 #include "ui.h"
@@ -139,14 +143,21 @@ static const char* SETTINGS_ITEMS[] = {
 static const int SETTINGS_COUNT = 6;
 
 // ── Button reading ────────────────────────────────────────────────────────────
+static const int     PWR_BTN_PIN    = 27;
 static unsigned long _midPressStart = 0;
 static bool          _midHeld       = false;
+static bool          _pwrBtnDown    = false;
 
 enum BtnEvent { BTN_NONE, BTN_UP, BTN_MID, BTN_DOWN, BTN_MID_LONG, BTN_EXT };
 
 static BtnEvent readButton() {
     M5.update();
-    if (M5.BtnEXT.wasPressed())  return BTN_EXT;
+
+    // PWR button (GPIO27) — edge-detect falling edge as sleep trigger
+    bool pwrPressed = (digitalRead(PWR_BTN_PIN) == LOW);
+    if (pwrPressed && !_pwrBtnDown) { _pwrBtnDown = true;  return BTN_EXT; }
+    if (!pwrPressed)                  _pwrBtnDown = false;
+
     if (M5.BtnUP.wasPressed())   return BTN_UP;
     if (M5.BtnDOWN.wasPressed()) return BTN_DOWN;
 
@@ -169,6 +180,21 @@ static BtnEvent readButton() {
 
 static void touch() { _lastActivityMs = millis(); }
 
+// ── Battery ───────────────────────────────────────────────────────────────────
+static int getBatPercent() {
+    analogSetPinAttenuation(35, ADC_11db);
+    esp_adc_cal_characteristics_t* chars =
+        (esp_adc_cal_characteristics_t*)calloc(1, sizeof(esp_adc_cal_characteristics_t));
+    esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_12, ADC_WIDTH_BIT_12, 3600, chars);
+    uint32_t mv = esp_adc_cal_raw_to_voltage(analogRead(35), chars);
+    free(chars);
+    float v = float(mv) * 25.1f / 5.1f / 1000.0f;
+    int pct = (int)((v - 3.2f) / (4.2f - 3.2f) * 100.0f);
+    if (pct < 0)   pct = 0;
+    if (pct > 100) pct = 100;
+    return pct;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 static void formatAgo(time_t ts, time_t now, char* buf, size_t len) {
     if (ts <= 0 || now <= ts) { strncpy(buf, "--", len); return; }
@@ -179,6 +205,55 @@ static void formatAgo(time_t ts, time_t now, char* buf, size_t len) {
     if (day > 0)     snprintf(buf, len, "%dd%dh", (int)day,  (int)(hr  % 24));
     else if (hr > 0) snprintf(buf, len, "%dh%dm", (int)hr,   (int)(min % 60));
     else             snprintf(buf, len, "%dm",     (int)min);
+}
+
+// ── RTC helpers (BM8563) ─────────────────────────────────────────────────────
+
+// Wait up to timeoutMs for SNTP to complete; returns true if synced.
+static bool waitNtp(unsigned long timeoutMs) {
+    unsigned long start = millis();
+    while (sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED) {
+        if (millis() - start > timeoutMs) return false;
+        delay(100);
+    }
+    return true;
+}
+
+// Read BM8563 (stores local time) and apply to the system clock.
+static void syncSystemFromRtc() {
+    RTC_TimeTypeDef ts; RTC_DateTypeDef ds;
+    M5.Rtc.GetTime(&ts);
+    M5.Rtc.GetDate(&ds);
+    if (ds.Year < 2020 || ds.Year > 2100) return;
+    struct tm t = {};
+    t.tm_year  = ds.Year - 1900;
+    t.tm_mon   = ds.Month - 1;
+    t.tm_mday  = ds.Date;
+    t.tm_hour  = ts.Hours;
+    t.tm_min   = ts.Minutes;
+    t.tm_sec   = ts.Seconds;
+    t.tm_isdst = -1;
+    time_t epoch = mktime(&t);
+    if (epoch < 0) return;
+    struct timeval tv = { epoch, 0 };
+    settimeofday(&tv, nullptr);
+}
+
+// Write current system local time to BM8563.
+static void syncRtcFromSystem() {
+    time_t now = time(nullptr);
+    if (now < 1000000000UL) return;
+    struct tm* t = localtime(&now);
+    RTC_TimeTypeDef ts;
+    ts.Hours   = t->tm_hour;
+    ts.Minutes = t->tm_min;
+    ts.Seconds = t->tm_sec;
+    M5.Rtc.SetTime(&ts);
+    RTC_DateTypeDef ds;
+    ds.Year  = t->tm_year + 1900;
+    ds.Month = t->tm_mon + 1;
+    ds.Date  = t->tm_mday;
+    M5.Rtc.SetDate(&ds);
 }
 
 // ── Deep sleep with summary screen ───────────────────────────────────────────
@@ -192,6 +267,7 @@ static void goToSleep() {
     BBRecentRecord recs[3] = {};
     int recCount = _wifiOk ? api.getRecentRecords(recs, _childId) : 0;
 
+    int batPct = getBatPercent();
     time_t now = time(nullptr);
 
     UI::SummaryRecord srecs[3] = {};
@@ -206,10 +282,10 @@ static void goToSleep() {
         }
     }
 
-    char clockBuf[8] = "--:--";
+    char clockBuf[16] = "--:--";
     if (now > 1000000) {
         struct tm* t = localtime(&now);
-        strftime(clockBuf, sizeof(clockBuf), "%H:%M", t);
+        snprintf(clockBuf, sizeof(clockBuf), "%02d:%02d %d%%", t->tm_hour, t->tm_min, batPct);
     }
 
     display.drawSummary(_childName, clockBuf, srecs, recCount);
@@ -220,7 +296,7 @@ static void goToSleep() {
     // SPI goes quiet and the image degrades.  display.begin() re-inits on wakeup.
     M5.M5Ink.deepSleep();
 
-    // Wake on BtnMID press (GPIO38) OR after 5-minute timer for seamless refresh
+    // Wake on MID (GPIO38) press OR after 5-minute timer
     esp_sleep_enable_ext0_wakeup(GPIO_NUM_38, 0);
     esp_sleep_enable_timer_wakeup(5ULL * 60 * 1000000);
     esp_deep_sleep_start();
@@ -300,20 +376,23 @@ static void offlineLog(const char* path, const char* body, const char* successMs
 // ── Boot ──────────────────────────────────────────────────────────────────────
 static void handleBoot() {
     display.begin();
+    pinMode(PWR_BTN_PIN, INPUT_PULLUP);
     for (int i = 0; i < MEDICINE_COUNT; i++) _medicationPtrs[i] = MEDICINE_NAMES[i];
     _medicationPtrs[MEDICINE_COUNT] = "Back";
+
+    // Set TZ first so mktime() in syncSystemFromRtc() uses the correct local offset.
+    // configTzTime also starts the SNTP daemon; it will sync once WiFi is up.
+    configTzTime(BB_TIMEZONE, NTP_SERVER);
+    syncSystemFromRtc();  // clock is immediately correct from RTC, even without WiFi
 
     // Silent 5-minute refresh — skip the connecting screen entirely
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
         api.begin(BB_BASE_URL, BB_AUTH_TOKEN);
         const char* cached = api.getChildName();
         if (cached[0] != '\0') strncpy(_childName, cached, sizeof(_childName) - 1);
-        _childId = BB_CHILD_ID > 0 ? BB_CHILD_ID : -1;
+        _childId = BB_CHILD_ID > 0 ? BB_CHILD_ID : api.getChildId();
         _wifiOk = connectWiFi();
-        // Always restore timezone — configTzTime sets the TZ immediately (no WiFi
-        // needed for that); if WiFi is up, SNTP will re-sync in the background.
-        // Without this call, localtime() reverts to UTC after deep sleep.
-        configTzTime(BB_TIMEZONE, NTP_SERVER);
+        if (_wifiOk && waitNtp(5000)) syncRtcFromSystem();
         goToSleep();
         return;
     }
@@ -322,8 +401,7 @@ static void handleBoot() {
     api.begin(BB_BASE_URL, BB_AUTH_TOKEN);
 
     if (_wifiOk) {
-        configTzTime(BB_TIMEZONE, NTP_SERVER);
-        delay(1500);
+        if (waitNtp(10000)) syncRtcFromSystem();
 
         int q = api.offlineCount();
         if (q > 0) {

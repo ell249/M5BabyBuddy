@@ -275,35 +275,38 @@ void UI::drawSummary(const char* babyName, const char* clockStr,
     if (!_sprite) return;
     _sprite->clear();
 
-    // Header: baby name left, current clock right
+    // Header: baby name only
     _small(TEXT_LEFT, 8, babyName);
-    int cw = _smallWidth(clockStr);
-    _small(DISPLAY_W - cw - TEXT_LEFT, 8, clockStr);
     _hline(HEADER_H - 2);
 
+    // Footer: separator + time/battery right-aligned
+    static const int FOOTER_Y = DISPLAY_H - SMALL_H - 4;   // 179
+    _hline(FOOTER_Y - 2);
+    int fw = _smallWidth(clockStr);
+    _small(DISPLAY_W - fw - TEXT_LEFT, FOOTER_Y, clockStr);
+
+    // Content rows fitted between header and footer
+    static const int ICON_W   = 20;
+    static const int ICON_GAP = 6;
+    static const int TEXT_GAP = 4;
+    static const int ROW_H    = (FOOTER_Y - CONTENT_Y) / MAX_ROWS;   // ~47px
+
     if (count == 0) {
-        _bigCenter(CONTENT_Y + (DISPLAY_H - CONTENT_Y - BIG_H) / 2, "No data");
+        _bigCenter(CONTENT_Y + (FOOTER_Y - CONTENT_Y - BIG_H) / 2, "No data");
         return;
     }
-
-    // 3 equal rows in the content area
-    // Each row: [20px icon] [18pt relative time] / [12pt absolute time beneath]
-    static const int ICON_W    = 20;
-    static const int ICON_GAP  = 6;
-    static const int TEXT_GAP  = 4;   // between rel and abs lines
-    static const int ROW_H     = (DISPLAY_H - CONTENT_Y) / MAX_ROWS;
 
     for (int i = 0; i < count && i < MAX_ROWS; i++) {
         int rowY = CONTENT_Y + i * ROW_H;
 
-        // Icon centred vertically in row (icon height ≈ 20px)
+        // Icon centred vertically in row
         _drawIcon(TEXT_LEFT, rowY + (ROW_H - 20) / 2, records[i].iconType);
 
         // Text block: relTime (18pt) above absTime (12pt)
-        int textX     = TEXT_LEFT + ICON_W + ICON_GAP;
-        int blockH    = BIG_H + TEXT_GAP + SMALL_H;
-        int textY     = rowY + (ROW_H - blockH) / 2;
-        _big(textX,  textY,            records[i].relTime);
+        int textX  = TEXT_LEFT + ICON_W + ICON_GAP;
+        int blockH = BIG_H + TEXT_GAP + SMALL_H;
+        int textY  = rowY + (ROW_H - blockH) / 2;
+        _big(textX,  textY,                   records[i].relTime);
         _small(textX, textY + BIG_H + TEXT_GAP, records[i].absTime);
     }
 }

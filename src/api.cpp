@@ -344,6 +344,13 @@ int BabyBuddyAPI::getRecentRecords(BBRecentRecord records[3], int childId) {
     memset(all, 0, sizeof(all));
     int count = 0;
 
+    // Single SSL client reused across all requests — only one handshake for all 7 GETs
+    bool isHttps = _isHttps(_baseUrl);
+    WiFiClientSecure secureClient;
+    if (isHttps) secureClient.setInsecure();
+    HTTPClient http;
+    http.setReuse(true);
+
     for (int qi = 0; qi < NQUERIES; qi++) {
         char path[80];
         if (childId > 0)
@@ -351,8 +358,15 @@ int BabyBuddyAPI::getRecentRecords(BBRecentRecord records[3], int childId) {
         else
             strncpy(path, queries[qi].base, sizeof(path) - 1);
 
-        int code;
-        String body = _get(path, code);
+        char url[192];
+        snprintf(url, sizeof(url), "%s%s", _baseUrl, path);
+        bool begun = isHttps ? http.begin(secureClient, url) : http.begin(url);
+        if (!begun) continue;
+        http.addHeader("Authorization", _authHeader);
+        http.addHeader("Content-Type", "application/json");
+        int code = http.GET();
+        String body = (code > 0) ? http.getString() : "";
+        http.end();
         if (code != 200 || body.isEmpty()) continue;
 
         JsonDocument doc;

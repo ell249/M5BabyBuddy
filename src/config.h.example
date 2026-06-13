@@ -28,7 +28,7 @@
 #define NTP_SERVER       "pool.ntp.org"
 
 // Seconds of inactivity before the device renders the summary and deep-sleeps
-#define SLEEP_TIMEOUT_S  30
+#define SLEEP_TIMEOUT_S  10
 
 // Medications shown in the Medication menu (UP/DOWN to pick, then adjust dose)
 // amount_unit: any string accepted by Baby Buddy — "mL", "mg", "oz", etc.
