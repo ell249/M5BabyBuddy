@@ -24,6 +24,7 @@ void UI::refresh(bool full) {
     if (!_sprite) return;
     if (full) M5.M5Ink.clear();
     _sprite->pushSprite();
+    M5.M5Ink.waitDisplay();  // block until EPD physical refresh completes
 }
 
 // ── Primitives ────────────────────────────────────────────────────────────────
@@ -33,7 +34,10 @@ void UI::_hline(int y) {
 }
 
 void UI::_fill(int x, int y, int w, int h) {
-    _sprite->FillRect(x, y, w, h, 1);
+    // FillRect passes pixBit=1 raw to lgfx fillRect, but the M5CoreInk panel
+    // driver inverts the buffer, so ink colour is 0xFFFF not 1.
+    // Using M5Canvas::fillRect directly avoids Ink_Sprite's truncation to uint8_t.
+    static_cast<M5Canvas*>(_sprite)->fillRect(x, y, w, h, 0xFFFF);
 }
 
 void UI::_rect(int x, int y, int w, int h) {
@@ -143,6 +147,14 @@ void UI::drawConnecting(const char* ssid) {
     _small(TEXT_LEFT, CONTENT_Y + BIG_H + 10, buf);
 }
 
+void UI::drawConnectingDots(int n) {
+    if (!_sprite) return;
+    _sprite->clear();
+    // Three-frame dot cycle — large enough to see clearly on e-ink
+    static const char* frames[] = {".", "..", "..."};
+    _bigCenter((DISPLAY_H - BIG_H) / 2, frames[n % 3]);
+}
+
 void UI::drawStatus(const char* msg) {
     if (!_sprite) return;
     _sprite->clear();
@@ -196,12 +208,37 @@ void UI::drawNumericSelector(const char* label, float value,
 
 // ── Sleep summary screen ──────────────────────────────────────────────────────
 
+void UI::_drawIcon(int x, int y, int type) {
+    if (!_sprite) return;
+    switch (type) {
+        case 0:  // Bottle — solid chunky silhouette
+            _fill(x+7,  y+0,  6,  5);   // narrow spout (solid)
+            _fill(x+4,  y+5,  12, 2);   // shoulder
+            _fill(x+2,  y+7,  16, 13);  // wide body (solid)
+            break;
+        case 1:  // Diaper — top/bottom bands + crotch bridge
+            _fill(x+0,  y+0,  20, 4);   // top waistband
+            _fill(x+0,  y+4,  4,  12);  // left panel
+            _fill(x+16, y+4,  4,  12);  // right panel
+            _fill(x+4,  y+8,  12, 4);   // crotch bridge
+            _fill(x+0,  y+16, 20, 4);   // bottom band
+            break;
+        case 2:  // Crescent moon — clear C-shape, no thin lines, no fillCircle
+            _fill(x+3, y+0,  9, 3);    // wide top arc
+            _fill(x+1, y+3,  5, 2);    // upper-left arm
+            _fill(x+0, y+5,  4, 10);   // thick left body
+            _fill(x+1, y+15, 5, 2);    // lower-left arm
+            _fill(x+3, y+17, 9, 3);    // wide bottom arc
+            break;
+    }
+}
+
 void UI::drawSummary(const char* babyName, const char* clockStr,
                      const SummaryRecord* records, int count) {
     if (!_sprite) return;
     _sprite->clear();
 
-    // Header: both name and clock in small font so they never overlap
+    // Header: baby name left, current clock right
     _small(TEXT_LEFT, 8, babyName);
     int cw = _smallWidth(clockStr);
     _small(DISPLAY_W - cw - TEXT_LEFT, 8, clockStr);
@@ -212,14 +249,25 @@ void UI::drawSummary(const char* babyName, const char* clockStr,
         return;
     }
 
-    // Evenly space up to 3 rows — label left, time right, both in 18pt
-    int availH = DISPLAY_H - CONTENT_Y;
-    int rowSpacing = availH / count;
+    // 3 equal rows in the content area
+    // Each row: [20px icon] [18pt relative time] / [12pt absolute time beneath]
+    static const int ICON_W    = 20;
+    static const int ICON_GAP  = 6;
+    static const int TEXT_GAP  = 4;   // between rel and abs lines
+    static const int ROW_H     = (DISPLAY_H - CONTENT_Y) / MAX_ROWS;
+
     for (int i = 0; i < count && i < MAX_ROWS; i++) {
-        int y = CONTENT_Y + i * rowSpacing + (rowSpacing - BIG_H) / 2;
-        _big(TEXT_LEFT, y, records[i].label);
-        int tw = _bigWidth(records[i].time);
-        _big(DISPLAY_W - tw - TEXT_LEFT, y, records[i].time);
+        int rowY = CONTENT_Y + i * ROW_H;
+
+        // Icon centred vertically in row (icon height ≈ 20px)
+        _drawIcon(TEXT_LEFT, rowY + (ROW_H - 20) / 2, records[i].iconType);
+
+        // Text block: relTime (18pt) above absTime (12pt)
+        int textX     = TEXT_LEFT + ICON_W + ICON_GAP;
+        int blockH    = BIG_H + TEXT_GAP + SMALL_H;
+        int textY     = rowY + (ROW_H - blockH) / 2;
+        _big(textX,  textY,            records[i].relTime);
+        _small(textX, textY + BIG_H + TEXT_GAP, records[i].absTime);
     }
 }
 

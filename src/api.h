@@ -2,6 +2,11 @@
 #include <Arduino.h>
 #include <time.h>
 
+struct BBChild {
+    int  id;
+    char name[32];
+};
+
 struct BBTimer {
     int    id;        // -1 = none
     time_t start;
@@ -15,9 +20,12 @@ struct BBResult {
 };
 
 struct BBRecentRecord {
-    char type[12];    // "Feed", "Diap", "Sleep"
-    char timeStr[8];  // "HH:MM"
-    char detail[32];  // "45m  Both breasts" etc.
+    char   type[12];      // "Feed", "Diap", "Sleep", "Tummy", "Pump"
+    int    iconType;      // 0=bottle, 1=diaper, 2=moon
+    char   timeStr[8];    // "HH:MM"
+    time_t timestamp;     // epoch of the record start (0 if unavailable)
+    char   method[4];     // feed only: "L","R","B","F","P"; empty otherwise
+    char   detail[32];
 };
 
 class BabyBuddyAPI {
@@ -31,6 +39,12 @@ public:
     void fetchChildName(int childId);
     const char* getChildName() const { return _childName; }
 
+    // Fetches all children from API (returns count, up to maxCount)
+    int fetchChildren(BBChild* out, int maxCount);
+
+    // Persists the chosen child to NVS and updates internal name cache
+    void setActiveChild(int id, const char* name);
+
     // Timer management
     BBTimer getActiveTimer(const char* name);
     BBResult startTimer(const char* name, int childId, BBTimer& out);
@@ -42,9 +56,11 @@ public:
     BBResult logSleep(int child, time_t start, time_t end);
     BBResult logTummyTime(int child, time_t start, time_t end);
     BBResult logPumping(int child, time_t start, time_t end, float amountMl);
+    BBResult logMedication(int child, time_t when, const char* name,
+                           float amount, const char* unit);
 
-    // Fetch last record for each of feeding, diaper, sleep
-    bool getRecentRecords(BBRecentRecord records[3]);
+    // Fetch the 3 most recent records for a child across all activity types; returns count (0-3)
+    int getRecentRecords(BBRecentRecord records[3], int childId);
 
     // Offline queue stored in NVS
     void enqueueOffline(const char* method, const char* endpoint, const char* body);

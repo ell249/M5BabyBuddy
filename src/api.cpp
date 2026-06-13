@@ -181,6 +181,37 @@ int BabyBuddyAPI::getChildId() {
     return id;
 }
 
+int BabyBuddyAPI::fetchChildren(BBChild* out, int maxCount) {
+    int code;
+    String body = _get("/api/children/", code);
+    if (code != 200 || body.isEmpty()) return 0;
+
+    JsonDocument doc;
+    if (deserializeJson(doc, body) != DeserializationError::Ok) return 0;
+    JsonArray results = doc["results"].as<JsonArray>();
+
+    int count = 0;
+    for (JsonObject child : results) {
+        if (count >= maxCount) break;
+        out[count].id = child["id"] | -1;
+        const char* first = child["first_name"] | "";
+        strncpy(out[count].name, first, sizeof(out[count].name) - 1);
+        out[count].name[sizeof(out[count].name) - 1] = '\0';
+        count++;
+    }
+    return count;
+}
+
+void BabyBuddyAPI::setActiveChild(int id, const char* name) {
+    strncpy(_childName, name, sizeof(_childName) - 1);
+    _childName[sizeof(_childName) - 1] = '\0';
+    Preferences p;
+    p.begin(NVS_CHILD_NS, false);
+    p.putInt(NVS_CHILD_KEY, id);
+    p.putString("name", name);
+    p.end();
+}
+
 // ── Timer management ──────────────────────────────────────────────────────────
 
 BBTimer BabyBuddyAPI::getActiveTimer(const char* name) {
@@ -234,13 +265,18 @@ BBResult BabyBuddyAPI::logFeeding(int child, time_t start, time_t end,
                                    const char* method) {
     char s[24], e[24];
     _isoTime(start, s, sizeof(s)); _isoTime(end, e, sizeof(e));
-    const char* type = "br";
-    if (strcmp(method,"f")==0) type="fo";
-    else if (strcmp(method,"s")==0) type="so";
+    // Convert internal abbreviations to the full strings the API requires
+    const char* apiMethod = "bottle";
+    const char* apiType   = "breast milk";
+    if (strcmp(method,"bl")==0)      { apiMethod="left breast";  }
+    else if (strcmp(method,"br")==0) { apiMethod="right breast"; }
+    else if (strcmp(method,"bo")==0) { apiMethod="both breasts"; }
+    else if (strcmp(method,"f")==0)  { apiMethod="bottle"; apiType="formula"; }
+    // "p" (pumped) stays as bottle + breast milk
     char body[256];
     snprintf(body, sizeof(body),
              "{\"child\":%d,\"start\":\"%s\",\"end\":\"%s\","
-             "\"method\":\"%s\",\"type\":\"%s\"}", child, s, e, method, type);
+             "\"method\":\"%s\",\"type\":\"%s\"}", child, s, e, apiMethod, apiType);
     return _post("/api/feedings/", body);
 }
 
@@ -279,22 +315,44 @@ BBResult BabyBuddyAPI::logPumping(int child, time_t start, time_t end,
     return _post("/api/pumping/", body);
 }
 
+BBResult BabyBuddyAPI::logMedication(int child, time_t when, const char* name,
+                                    float amount, const char* unit) {
+    char t[24]; _isoTime(when, t, sizeof(t));
+    char body[256];
+    snprintf(body, sizeof(body),
+             "{\"child\":%d,\"name\":\"%s\",\"time\":\"%s\","
+             "\"amount\":%.2f,\"amount_unit\":\"%s\"}",
+             child, name, t, amount, unit);
+    return _post("/api/medications/", body);
+}
+
 // ── Recent records for summary screen ────────────────────────────────────────
 
-bool BabyBuddyAPI::getRecentRecords(BBRecentRecord records[3]) {
-    struct { const char* path; const char* type; int idx; } queries[] = {
-        { "/api/feedings/?limit=1",  "Feed",  0 },
-        { "/api/changes/?limit=1",   "Diap",  1 },
-        { "/api/sleep/?limit=1",     "Sleep", 2 },
+int BabyBuddyAPI::getRecentRecords(BBRecentRecord records[3], int childId) {
+    struct { const char* base; const char* type; int icon; } queries[] = {
+        { "/api/feedings/?limit=1",    "Feed",  0 },
+        { "/api/changes/?limit=1",     "Diap",  1 },
+        { "/api/sleep/?limit=1",       "Sleep", 2 },
+        { "/api/tummy-times/?limit=1", "Tummy", 2 },
+        { "/api/pumping/?limit=1",     "Pump",  0 },
+        { "/api/medications/?limit=1", "Meds",  0 },
     };
-    bool anyOk = false;
+    const int NQUERIES = 6;
 
-    for (auto& q : queries) {
+    BBRecentRecord all[6];
+    memset(all, 0, sizeof(all));
+    int count = 0;
+
+    for (int qi = 0; qi < NQUERIES; qi++) {
+        // Medications endpoint may not support ?child= filter; apply it only to others
+        bool usesChildFilter = (childId > 0) && (strcmp(queries[qi].type, "Meds") != 0);
+        char path[80];
+        if (usesChildFilter)
+            snprintf(path, sizeof(path), "%s&child=%d", queries[qi].base, childId);
+        else
+            strncpy(path, queries[qi].base, sizeof(path) - 1);
         int code;
-        String body = _get(q.path, code);
-        BBRecentRecord& r = records[q.idx];
-        strncpy(r.type, q.type, sizeof(r.type)-1);
-        r.timeStr[0] = '\0'; r.detail[0] = '\0';
+        String body = _get(path, code);
         if (code != 200 || body.isEmpty()) continue;
 
         JsonDocument doc;
@@ -302,60 +360,125 @@ bool BabyBuddyAPI::getRecentRecords(BBRecentRecord records[3]) {
         JsonArray results = doc["results"].as<JsonArray>();
         if (results.size() == 0) continue;
 
-        anyOk = true;
         JsonObject entry = results[0].as<JsonObject>();
 
-        // Parse time (try "start", fallback "time")
+        // For medications, filter by child client-side since the API may not support it
+        if (!usesChildFilter && childId > 0 && strcmp(queries[qi].type, "Meds") == 0) {
+            if ((int)(entry["child"] | -1) != childId) continue;
+        }
+
+        BBRecentRecord& r = all[count];
+        strncpy(r.type, queries[qi].type, sizeof(r.type) - 1);
+        r.iconType = queries[qi].icon;
         const char* startStr = entry["start"] | entry["time"] | "";
+
         if (strlen(startStr) >= 16) {
             int h, mi;
             if (sscanf(startStr + 11, "%d:%d", &h, &mi) == 2)
                 snprintf(r.timeStr, sizeof(r.timeStr), "%02d:%02d", h, mi);
+            struct tm tmP = {};
+            if (sscanf(startStr, "%d-%d-%dT%d:%d:%d",
+                       &tmP.tm_year, &tmP.tm_mon, &tmP.tm_mday,
+                       &tmP.tm_hour, &tmP.tm_min, &tmP.tm_sec) == 6) {
+                tmP.tm_year -= 1900; tmP.tm_mon -= 1; tmP.tm_isdst = -1;
+                r.timestamp = mktime(&tmP);
+            }
         }
 
-        if (q.idx == 0) {  // Feeding
+        if (strcmp(queries[qi].type, "Feed") == 0) {
             const char* method = entry["method"] | "?";
             const char* endStr = entry["end"] | startStr;
-            struct tm tmS={}, tmE={};
-            sscanf(startStr,"%d-%d-%dT%d:%d:%d",
-                   &tmS.tm_year,&tmS.tm_mon,&tmS.tm_mday,
-                   &tmS.tm_hour,&tmS.tm_min,&tmS.tm_sec);
-            sscanf(endStr,"%d-%d-%dT%d:%d:%d",
-                   &tmE.tm_year,&tmE.tm_mon,&tmE.tm_mday,
-                   &tmE.tm_hour,&tmE.tm_min,&tmE.tm_sec);
-            tmS.tm_year-=1900; tmS.tm_mon-=1;
-            tmE.tm_year-=1900; tmE.tm_mon-=1;
+            struct tm tmS = {}, tmE = {};
+            sscanf(startStr, "%d-%d-%dT%d:%d:%d",
+                   &tmS.tm_year, &tmS.tm_mon, &tmS.tm_mday,
+                   &tmS.tm_hour, &tmS.tm_min, &tmS.tm_sec);
+            sscanf(endStr, "%d-%d-%dT%d:%d:%d",
+                   &tmE.tm_year, &tmE.tm_mon, &tmE.tm_mday,
+                   &tmE.tm_hour, &tmE.tm_min, &tmE.tm_sec);
+            tmS.tm_year -= 1900; tmS.tm_mon -= 1;
+            tmE.tm_year -= 1900; tmE.tm_mon -= 1;
             char dur[12];
             _formatDuration(mktime(&tmS), mktime(&tmE), dur, sizeof(dur));
-            const char* mname="?";
-            if (strcmp(method,"bl")==0)      mname="Left";
-            else if (strcmp(method,"br")==0) mname="Right";
-            else if (strcmp(method,"bo")==0) mname="Both";
-            else if (strcmp(method,"f")==0)  mname="Formula";
-            else if (strcmp(method,"p")==0)  mname="Pumped";
+            const char* mabbr = "?", *mname = "?";
+            if      (strcmp(method, "left breast")  == 0) { mabbr = "L"; mname = "Left"; }
+            else if (strcmp(method, "right breast") == 0) { mabbr = "R"; mname = "Right"; }
+            else if (strcmp(method, "both breasts") == 0) { mabbr = "B"; mname = "Both"; }
+            else if (strcmp(method, "bottle") == 0) {
+                const char* feedType = entry["type"] | "";
+                if (strcmp(feedType, "formula") == 0) { mabbr = "F"; mname = "Formula"; }
+                else                                   { mabbr = "P"; mname = "Pumped"; }
+            }
+            strncpy(r.method, mabbr, sizeof(r.method) - 1);
             snprintf(r.detail, sizeof(r.detail), "%s  %s", dur, mname);
-        } else if (q.idx == 1) {  // Diaper
+
+        } else if (strcmp(queries[qi].type, "Diap") == 0) {
             bool wet   = entry["wet"]   | false;
             bool solid = entry["solid"] | false;
-            if (wet && solid)   strncpy(r.detail, "Wet + Dirty", sizeof(r.detail)-1);
-            else if (wet)       strncpy(r.detail, "Wet",         sizeof(r.detail)-1);
-            else if (solid)     strncpy(r.detail, "Dirty",       sizeof(r.detail)-1);
-            else                strncpy(r.detail, "Dry",         sizeof(r.detail)-1);
-        } else {  // Sleep
+            if      (wet && solid) strncpy(r.detail, "Wet+Dirty", sizeof(r.detail) - 1);
+            else if (wet)          strncpy(r.detail, "Wet",       sizeof(r.detail) - 1);
+            else if (solid)        strncpy(r.detail, "Dirty",     sizeof(r.detail) - 1);
+            else                   strncpy(r.detail, "Dry",       sizeof(r.detail) - 1);
+
+        } else if (strcmp(queries[qi].type, "Pump") == 0) {
+            float amount = entry["amount"] | 0.0f;
             const char* endStr = entry["end"] | startStr;
-            struct tm tmS={}, tmE={};
-            sscanf(startStr,"%d-%d-%dT%d:%d:%d",
-                   &tmS.tm_year,&tmS.tm_mon,&tmS.tm_mday,
-                   &tmS.tm_hour,&tmS.tm_min,&tmS.tm_sec);
-            sscanf(endStr,"%d-%d-%dT%d:%d:%d",
-                   &tmE.tm_year,&tmE.tm_mon,&tmE.tm_mday,
-                   &tmE.tm_hour,&tmE.tm_min,&tmE.tm_sec);
-            tmS.tm_year-=1900; tmS.tm_mon-=1;
-            tmE.tm_year-=1900; tmE.tm_mon-=1;
+            struct tm tmS = {}, tmE = {};
+            sscanf(startStr, "%d-%d-%dT%d:%d:%d",
+                   &tmS.tm_year, &tmS.tm_mon, &tmS.tm_mday,
+                   &tmS.tm_hour, &tmS.tm_min, &tmS.tm_sec);
+            sscanf(endStr, "%d-%d-%dT%d:%d:%d",
+                   &tmE.tm_year, &tmE.tm_mon, &tmE.tm_mday,
+                   &tmE.tm_hour, &tmE.tm_min, &tmE.tm_sec);
+            tmS.tm_year -= 1900; tmS.tm_mon -= 1;
+            tmE.tm_year -= 1900; tmE.tm_mon -= 1;
+            char dur[12];
+            _formatDuration(mktime(&tmS), mktime(&tmE), dur, sizeof(dur));
+            if (amount > 0.0f)
+                snprintf(r.detail, sizeof(r.detail), "%s  %.0fml", dur, amount);
+            else
+                strncpy(r.detail, dur, sizeof(r.detail) - 1);
+
+        } else if (strcmp(queries[qi].type, "Meds") == 0) {
+            const char* name = entry["name"] | "";
+            float amount = entry["amount"] | 0.0f;
+            const char* unit = entry["amount_unit"] | "";
+            if (amount > 0.0f && unit[0])
+                snprintf(r.detail, sizeof(r.detail), "%s %.1f%s", name, amount, unit);
+            else
+                strncpy(r.detail, name, sizeof(r.detail) - 1);
+
+        } else {
+            // Sleep, Tummy — show duration
+            const char* endStr = entry["end"] | startStr;
+            struct tm tmS = {}, tmE = {};
+            sscanf(startStr, "%d-%d-%dT%d:%d:%d",
+                   &tmS.tm_year, &tmS.tm_mon, &tmS.tm_mday,
+                   &tmS.tm_hour, &tmS.tm_min, &tmS.tm_sec);
+            sscanf(endStr, "%d-%d-%dT%d:%d:%d",
+                   &tmE.tm_year, &tmE.tm_mon, &tmE.tm_mday,
+                   &tmE.tm_hour, &tmE.tm_min, &tmE.tm_sec);
+            tmS.tm_year -= 1900; tmS.tm_mon -= 1;
+            tmE.tm_year -= 1900; tmE.tm_mon -= 1;
             _formatDuration(mktime(&tmS), mktime(&tmE), r.detail, sizeof(r.detail));
         }
+
+        count++;
     }
-    return anyOk;
+
+    // Insertion sort by timestamp descending — most recent first
+    for (int i = 1; i < count; i++) {
+        BBRecentRecord key = all[i];
+        int j = i - 1;
+        while (j >= 0 && all[j].timestamp < key.timestamp) {
+            all[j + 1] = all[j];
+            j--;
+        }
+        all[j + 1] = key;
+    }
+
+    int outCount = count < 3 ? count : 3;
+    for (int i = 0; i < outCount; i++) records[i] = all[i];
+    return outCount;
 }
 
 // ── Offline queue (NVS indexed keys — avoids JSON-in-JSON complexity) ─────────

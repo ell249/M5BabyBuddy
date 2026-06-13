@@ -29,3 +29,11 @@
 
 // Seconds of inactivity before the device renders the summary and deep-sleeps
 #define SLEEP_TIMEOUT_S  30
+
+// Medications shown in the Medication menu (UP/DOWN to pick, then adjust dose)
+// amount_unit: any string accepted by Baby Buddy — "mL", "mg", "oz", etc.
+// Set MEDICINE_COUNT to 0 to hide the Medicine menu item.
+#define MEDICINE_COUNT 2
+static const char* const MEDICINE_NAMES[]   = { "Panadol",  "Nurofen" };
+static const float       MEDICINE_AMOUNTS[] = {   5.0f,       5.0f    };
+static const char* const MEDICINE_UNITS[]   = {  "mL",       "mL"     };

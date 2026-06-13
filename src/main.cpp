@@ -9,6 +9,14 @@
 #include "ui.h"
 #include "api.h"
 
+// Defaults if not defined in config.h
+#ifndef MEDICINE_COUNT
+#  define MEDICINE_COUNT 0
+static const char* const MEDICINE_NAMES[1]   = { nullptr };
+static const float       MEDICINE_AMOUNTS[1] = { 0.0f };
+static const char* const MEDICINE_UNITS[1]   = { nullptr };
+#endif
+
 // ── App states ────────────────────────────────────────────────────────────────
 enum AppState {
     ST_BOOT,
@@ -26,6 +34,10 @@ enum AppState {
     ST_PUMP_AMOUNT,
     ST_PUMP_SAVE,
     ST_SETTINGS,
+    ST_SETTINGS_CHILD,
+    ST_MEDICATION_SELECT,
+    ST_MEDICATION_AMOUNT,
+    ST_MEDICATION_SAVE,
     ST_ERROR,
     ST_SLEEPING,
 };
@@ -93,6 +105,13 @@ static int           _menuSel        = 0;
 static int           _subSel         = 0;
 static float         _pumpAmount     = 100.0f;
 static char          _feedMethod[4]  = "bo";
+static BBChild       _children[4]    = {};
+static int           _childCount     = 0;
+static int           _childSel       = 0;
+static const char*   _childNamePtrs[5] = {};  // up to 4 children + "Back"
+static int           _medicationIdx    = 0;
+static float         _medicationAmount = 0.0f;
+static const char*   _medicationPtrs[MEDICINE_COUNT + 1] = {};
 static bool          _diaperWet      = true;
 static bool          _diaperSolid    = false;
 static char          _errorMsg[80]   = "";
@@ -101,9 +120,9 @@ static unsigned long _timerRefreshMs = 0;
 
 // ── Menu definitions (≤8 chars per item for AsciiFont24x48) ──────────────────
 static const char* MAIN_ITEMS[] = {
-    "Feeding", "Diaper", "Sleep", "Tummy", "Pumping", "Settings"
+    "Feeding", "Diaper", "Sleep", "Tummy", "Pumping", "Medication", "Settings"
 };
-static const int MAIN_COUNT = 6;
+static const int MAIN_COUNT = 7;
 
 static const char* FEED_ITEMS[] = {
     "Left", "Right", "Both", "Formula", "Pumped", "Back"
@@ -115,18 +134,19 @@ static const char* DIAPER_ITEMS[] = { "Wet", "Dirty", "Both", "Back" };
 static const int DIAPER_COUNT = 4;
 
 static const char* SETTINGS_ITEMS[] = {
-    "WiFi", "Offline", "Replay", "Clear Q", "Back"
+    "WiFi", "Offline", "Replay", "Clear Q", "Child", "Back"
 };
-static const int SETTINGS_COUNT = 5;
+static const int SETTINGS_COUNT = 6;
 
 // ── Button reading ────────────────────────────────────────────────────────────
 static unsigned long _midPressStart = 0;
 static bool          _midHeld       = false;
 
-enum BtnEvent { BTN_NONE, BTN_UP, BTN_MID, BTN_DOWN, BTN_MID_LONG };
+enum BtnEvent { BTN_NONE, BTN_UP, BTN_MID, BTN_DOWN, BTN_MID_LONG, BTN_EXT };
 
 static BtnEvent readButton() {
     M5.update();
+    if (M5.BtnEXT.wasPressed())  return BTN_EXT;
     if (M5.BtnUP.wasPressed())   return BTN_UP;
     if (M5.BtnDOWN.wasPressed()) return BTN_DOWN;
 
@@ -149,26 +169,44 @@ static BtnEvent readButton() {
 
 static void touch() { _lastActivityMs = millis(); }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+static void formatAgo(time_t ts, time_t now, char* buf, size_t len) {
+    if (ts <= 0 || now <= ts) { strncpy(buf, "--", len); return; }
+    uint32_t sec = (uint32_t)(now - ts);
+    uint32_t min = sec / 60;
+    uint32_t hr  = min / 60;
+    uint32_t day = hr  / 24;
+    if (day > 0)     snprintf(buf, len, "%dd%dh", (int)day,  (int)(hr  % 24));
+    else if (hr > 0) snprintf(buf, len, "%dh%dm", (int)hr,   (int)(min % 60));
+    else             snprintf(buf, len, "%dm",     (int)min);
+}
+
 // ── Deep sleep with summary screen ───────────────────────────────────────────
 static void goToSleep() {
     _state = ST_SLEEPING;
 
+    // Give immediate visual feedback before potentially-slow API calls
+    display.drawStatus("...");
+    display.refresh();   // partial update — fast, no clear phase
+
     BBRecentRecord recs[3] = {};
-    bool gotRecs = _wifiOk && api.getRecentRecords(recs);
+    int recCount = _wifiOk ? api.getRecentRecords(recs, _childId) : 0;
+
+    time_t now = time(nullptr);
 
     UI::SummaryRecord srecs[3] = {};
-    int recCount = 0;
-    if (gotRecs) {
-        const char* labels[] = {"F", "D", "S"};
-        for (int i = 0; i < 3; i++) {
-            strncpy(srecs[i].label, labels[i],        sizeof(srecs[i].label) - 1);
-            strncpy(srecs[i].time,  recs[i].timeStr,  sizeof(srecs[i].time)  - 1);
+    for (int i = 0; i < recCount; i++) {
+        srecs[i].iconType = recs[i].iconType;
+        formatAgo(recs[i].timestamp, now, srecs[i].relTime, sizeof(srecs[i].relTime));
+        if (recs[i].method[0]) {
+            snprintf(srecs[i].absTime, sizeof(srecs[i].absTime),
+                     "%s %s", recs[i].timeStr, recs[i].method);
+        } else {
+            strncpy(srecs[i].absTime, recs[i].timeStr, sizeof(srecs[i].absTime) - 1);
         }
-        recCount = 3;
     }
 
     char clockBuf[8] = "--:--";
-    time_t now = time(nullptr);
     if (now > 1000000) {
         struct tm* t = localtime(&now);
         strftime(clockBuf, sizeof(clockBuf), "%H:%M", t);
@@ -177,19 +215,30 @@ static void goToSleep() {
     display.drawSummary(_childName, clockBuf, srecs, recCount);
     display.refresh(true);
 
-    // Wake on BtnMID press (GPIO38, active LOW — pressed = 0)
+    // Put the EPD controller into its own deep sleep — latches the image and
+    // powers down the HV supply.  Without this the controller keeps running after
+    // SPI goes quiet and the image degrades.  display.begin() re-inits on wakeup.
+    M5.M5Ink.deepSleep();
+
+    // Wake on BtnMID press (GPIO38) OR after 5-minute timer for seamless refresh
     esp_sleep_enable_ext0_wakeup(GPIO_NUM_38, 0);
-    delay(100);
+    esp_sleep_enable_timer_wakeup(5ULL * 60 * 1000000);
     esp_deep_sleep_start();
 }
 
 // ── WiFi ──────────────────────────────────────────────────────────────────────
-static bool connectWiFi() {
+static bool connectWiFi(bool showProgress = false) {
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     unsigned long t = millis();
+    int frame = 0;
     while (WiFi.status() != WL_CONNECTED && millis() - t < 30000UL) {
-        delay(500);
+        if (showProgress) {
+            display.drawConnectingDots(frame++);
+            display.refresh();   // partial — no clear flash, natural pacing via waitDisplay
+        } else {
+            delay(500);
+        }
     }
     return WiFi.status() == WL_CONNECTED;
 }
@@ -251,10 +300,25 @@ static void offlineLog(const char* path, const char* body, const char* successMs
 // ── Boot ──────────────────────────────────────────────────────────────────────
 static void handleBoot() {
     display.begin();
-    display.drawConnecting(WIFI_SSID);
-    display.refresh(true);
+    for (int i = 0; i < MEDICINE_COUNT; i++) _medicationPtrs[i] = MEDICINE_NAMES[i];
+    _medicationPtrs[MEDICINE_COUNT] = "Back";
 
-    _wifiOk = connectWiFi();
+    // Silent 5-minute refresh — skip the connecting screen entirely
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+        api.begin(BB_BASE_URL, BB_AUTH_TOKEN);
+        const char* cached = api.getChildName();
+        if (cached[0] != '\0') strncpy(_childName, cached, sizeof(_childName) - 1);
+        _childId = BB_CHILD_ID > 0 ? BB_CHILD_ID : -1;
+        _wifiOk = connectWiFi();
+        // Always restore timezone — configTzTime sets the TZ immediately (no WiFi
+        // needed for that); if WiFi is up, SNTP will re-sync in the background.
+        // Without this call, localtime() reverts to UTC after deep sleep.
+        configTzTime(BB_TIMEZONE, NTP_SERVER);
+        goToSleep();
+        return;
+    }
+
+    _wifiOk = connectWiFi(true);   // dots via partial refresh — no full-screen flash
     api.begin(BB_BASE_URL, BB_AUTH_TOKEN);
 
     if (_wifiOk) {
@@ -332,7 +396,13 @@ static void handleMainMenu(BtnEvent btn) {
             _state = ST_PUMP_TIMER;
             showTimerScreen();
             break;
-        case 5:  // Settings
+        case 5:  // Medication
+            _subSel = 0;
+            _state = ST_MEDICATION_SELECT;
+            display.drawMenu("Medication", _medicationPtrs, MEDICINE_COUNT + 1, _subSel);
+            display.refresh(true);
+            break;
+        case 6:  // Settings
             _subSel = 0;
             _state = ST_SETTINGS;
             display.drawMenu("Settings", SETTINGS_ITEMS, SETTINGS_COUNT, _subSel,
@@ -399,11 +469,16 @@ static void handleFeedingSave() {
         char startBuf[24], endBuf[24], body[256];
         struct tm* tmS = localtime(&start); strftime(startBuf, sizeof(startBuf), "%Y-%m-%dT%H:%M:%S", tmS);
         struct tm* tmE = localtime(&end);   strftime(endBuf,   sizeof(endBuf),   "%Y-%m-%dT%H:%M:%S", tmE);
-        const char* type = (strcmp(_feedMethod,"f")==0)?"fo":(strcmp(_feedMethod,"s")==0)?"so":"br";
+        const char* apiMethod = "bottle";
+        const char* apiType   = "breast milk";
+        if (strcmp(_feedMethod,"bl")==0)      { apiMethod="left breast";  }
+        else if (strcmp(_feedMethod,"br")==0) { apiMethod="right breast"; }
+        else if (strcmp(_feedMethod,"bo")==0) { apiMethod="both breasts"; }
+        else if (strcmp(_feedMethod,"f")==0)  { apiMethod="bottle"; apiType="formula"; }
         snprintf(body, sizeof(body),
                  "{\"child\":%d,\"start\":\"%s\",\"end\":\"%s\","
                  "\"method\":\"%s\",\"type\":\"%s\"}",
-                 _childId, startBuf, endBuf, _feedMethod, type);
+                 _childId, startBuf, endBuf, apiMethod, apiType);
         offlineLog("/api/feedings/", body, "Saved!");
     }
 }
@@ -509,7 +584,7 @@ static void handleSettings(BtnEvent btn) {
                          _wifiOk, api.offlineCount());
         display.refresh(); touch(); return;
     }
-    if (btn == BTN_MID_LONG || (btn == BTN_MID && _subSel == 4)) {
+    if (btn == BTN_MID_LONG || (btn == BTN_MID && _subSel == 5)) {
         touch(); enterMainMenu(); return;
     }
     if (btn != BTN_MID) return;
@@ -549,6 +624,113 @@ static void handleSettings(BtnEvent btn) {
             display.refresh();
             break;
         }
+        case 4: {  // Child
+            if (!_wifiOk) {
+                display.drawError("No WiFi", "Offline");
+                display.refresh();
+                break;
+            }
+            _childCount = api.fetchChildren(_children, 4);
+            if (_childCount == 0) {
+                display.drawError("Child", "Not found");
+                display.refresh();
+                break;
+            }
+            for (int i = 0; i < _childCount; i++) _childNamePtrs[i] = _children[i].name;
+            _childNamePtrs[_childCount] = "Back";
+            _childSel = 0;
+            _state = ST_SETTINGS_CHILD;
+            display.drawMenu("Child", _childNamePtrs, _childCount + 1, _childSel);
+            display.refresh(true);
+            break;
+        }
+    }
+}
+
+static void handleSettingsChild(BtnEvent btn) {
+    int count = _childCount + 1;
+    if (btn == BTN_UP   && _childSel > 0)          _childSel--;
+    if (btn == BTN_DOWN && _childSel < count - 1)  _childSel++;
+    if (btn == BTN_UP || btn == BTN_DOWN) {
+        display.drawMenu("Child", _childNamePtrs, count, _childSel);
+        display.refresh(); touch(); return;
+    }
+    if (btn == BTN_MID_LONG || (btn == BTN_MID && _childSel == count - 1)) {
+        touch();
+        _subSel = 4;  // return focus to "Child" in settings
+        _state = ST_SETTINGS;
+        display.drawMenu("Settings", SETTINGS_ITEMS, SETTINGS_COUNT, _subSel,
+                         _wifiOk, api.offlineCount());
+        display.refresh(true);
+        return;
+    }
+    if (btn != BTN_MID) return;
+    touch();
+    _childId = _children[_childSel].id;
+    strncpy(_childName, _children[_childSel].name, sizeof(_childName) - 1);
+    api.setActiveChild(_childId, _childName);
+    display.drawStatus("Saved!");
+    display.refresh(true);
+    delay(1000);
+    _subSel = 4;
+    _state = ST_SETTINGS;
+    display.drawMenu("Settings", SETTINGS_ITEMS, SETTINGS_COUNT, _subSel,
+                     _wifiOk, api.offlineCount());
+    display.refresh(true);
+    touch();
+}
+
+static void handleMedicationSelect(BtnEvent btn) {
+    int count = MEDICINE_COUNT + 1;
+    if (btn == BTN_UP   && _subSel > 0)          _subSel--;
+    if (btn == BTN_DOWN && _subSel < count - 1)  _subSel++;
+    if (btn == BTN_UP || btn == BTN_DOWN) {
+        display.drawMenu("Medication", _medicationPtrs, count, _subSel);
+        display.refresh(); touch(); return;
+    }
+    if (btn == BTN_MID_LONG) { enterMainMenu(); return; }
+    if (btn != BTN_MID) return;
+    touch();
+    if (_subSel == count - 1) { enterMainMenu(); return; }  // Back
+    _medicationIdx    = _subSel;
+    _medicationAmount = MEDICINE_AMOUNTS[_medicationIdx];
+    _state = ST_MEDICATION_AMOUNT;
+    display.drawNumericSelector(MEDICINE_NAMES[_medicationIdx], _medicationAmount,
+                                0.5f, 0.0f, 50.0f, MEDICINE_UNITS[_medicationIdx], _wifiOk);
+    display.refresh(true);
+}
+
+static void handleMedicationAmount(BtnEvent btn) {
+    if (btn == BTN_UP   && _medicationAmount < 50.0f) _medicationAmount += 0.5f;
+    if (btn == BTN_DOWN && _medicationAmount > 0.0f)  _medicationAmount -= 0.5f;
+    if (btn == BTN_UP || btn == BTN_DOWN) {
+        display.drawNumericSelector(MEDICINE_NAMES[_medicationIdx], _medicationAmount,
+                                    0.5f, 0.0f, 50.0f, MEDICINE_UNITS[_medicationIdx], _wifiOk);
+        display.refresh(); touch(); return;
+    }
+    if (btn == BTN_MID_LONG) { enterMainMenu(); return; }
+    if (btn != BTN_MID) return;
+    touch();
+    _state = ST_MEDICATION_SAVE;
+}
+
+static void handleMedicationSave() {
+    time_t now    = time(nullptr);
+    const char* name = MEDICINE_NAMES[_medicationIdx];
+    const char* unit = MEDICINE_UNITS[_medicationIdx];
+
+    if (_wifiOk) {
+        BBResult r = api.logMedication(_childId, now, name, _medicationAmount, unit);
+        finishWithStatus("Saved!", r.ok, r.httpCode);
+    } else {
+        char timeBuf[24], body[256];
+        struct tm* tm = localtime(&now);
+        strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%dT%H:%M:%S", tm);
+        snprintf(body, sizeof(body),
+                 "{\"child\":%d,\"name\":\"%s\",\"time\":\"%s\","
+                 "\"amount\":%.2f,\"amount_unit\":\"%s\"}",
+                 _childId, name, timeBuf, _medicationAmount, unit);
+        offlineLog("/api/medications/", body, "Saved!");
     }
 }
 
@@ -561,6 +743,9 @@ void setup() {
 
 void loop() {
     BtnEvent btn = readButton();
+
+    // G5 (EXT) button — go to sleep screen from anywhere
+    if (btn == BTN_EXT) { goToSleep(); return; }
 
     switch (_state) {
         case ST_MAIN_MENU:
@@ -599,6 +784,19 @@ void loop() {
             break;
         case ST_SETTINGS:
             if (btn != BTN_NONE) handleSettings(btn);
+            break;
+        case ST_SETTINGS_CHILD:
+            if (btn != BTN_NONE) handleSettingsChild(btn);
+            break;
+        case ST_MEDICATION_SELECT:
+            if (btn != BTN_NONE) handleMedicationSelect(btn);
+            break;
+        case ST_MEDICATION_AMOUNT:
+            if (btn != BTN_NONE) handleMedicationAmount(btn);
+            if (_state == ST_MEDICATION_SAVE) handleMedicationSave();
+            break;
+        case ST_MEDICATION_SAVE:
+            handleMedicationSave();
             break;
         case ST_ERROR:
             if (btn == BTN_MID || btn == BTN_MID_LONG) enterMainMenu();

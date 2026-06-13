@@ -21,7 +21,8 @@ public:
     void clear();
     void refresh(bool full = false);
 
-    void drawConnecting(const char* ssid);
+    void drawConnecting(const char* ssid);       // kept for reference, no longer called on boot
+    void drawConnectingDots(int n);              // minimal partial-refresh connecting indicator
     void drawStatus(const char* msg);
     void drawError(const char* title, const char* msg);
     void drawHeader(const char* name, bool wifiOk, int offlineCount = 0);
@@ -32,8 +33,9 @@ public:
                              float minVal, float maxVal, const char* unit, bool wifiOk = true);
 
     struct SummaryRecord {
-        char label[4];   // "F", "D", "S"
-        char time[6];    // "HH:MM"
+        int  iconType;    // 0=feeding, 1=diaper, 2=sleep
+        char relTime[12]; // "45m" or "1h5m" (relative)
+        char absTime[12]; // "10:30" or "10:30 B" (absolute + optional method)
     };
     void drawSummary(const char* babyName, const char* clockStr,
                      const SummaryRecord* records, int count);
@@ -54,6 +56,7 @@ private:
     void _small(int x, int y, const char* s);        // 12pt — indicators
     int  _smallWidth(const char* s);
     void _formatElapsed(uint32_t sec, char* buf, size_t len);
+    void _drawIcon(int x, int y, int type);          // 20×20 icon: 0=bottle,1=diaper,2=moon
 };
 
 extern UI display;
