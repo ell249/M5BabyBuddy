@@ -321,36 +321,36 @@ BBResult BabyBuddyAPI::logMedication(int child, time_t when, const char* name,
     char body[256];
     snprintf(body, sizeof(body),
              "{\"child\":%d,\"name\":\"%s\",\"time\":\"%s\","
-             "\"amount\":%.2f,\"amount_unit\":\"%s\"}",
+             "\"dosage\":%.2f,\"dosage_unit\":\"%s\"}",
              child, name, t, amount, unit);
-    return _post("/api/medications/", body);
+    return _post("/api/medication/", body);
 }
 
 // ── Recent records for summary screen ────────────────────────────────────────
 
 int BabyBuddyAPI::getRecentRecords(BBRecentRecord records[3], int childId) {
     struct { const char* base; const char* type; int icon; } queries[] = {
-        { "/api/feedings/?limit=1",    "Feed",  0 },
-        { "/api/changes/?limit=1",     "Diap",  1 },
-        { "/api/sleep/?limit=1",       "Sleep", 2 },
-        { "/api/tummy-times/?limit=1", "Tummy", 2 },
-        { "/api/pumping/?limit=1",     "Pump",  0 },
-        { "/api/medications/?limit=1", "Meds",  0 },
+        { "/api/feedings/?limit=1",     "Feed",  0 },  // bottle
+        { "/api/changes/?limit=1",      "Diap",  1 },  // diaper
+        { "/api/sleep/?limit=1",        "Sleep", 2 },  // moon
+        { "/api/tummy-times/?limit=1",  "Tummy", 3 },  // hourglass
+        { "/api/pumping/?limit=1",      "Pump",  4 },  // droplet
+        { "/api/medication/?limit=1",   "Meds",  5 },  // pill
+        { "/api/temperature/?limit=1",  "Temp",  6 },  // thermometer
     };
-    const int NQUERIES = 6;
+    const int NQUERIES = 7;
 
-    BBRecentRecord all[6];
+    BBRecentRecord all[7];
     memset(all, 0, sizeof(all));
     int count = 0;
 
     for (int qi = 0; qi < NQUERIES; qi++) {
-        // Medications endpoint may not support ?child= filter; apply it only to others
-        bool usesChildFilter = (childId > 0) && (strcmp(queries[qi].type, "Meds") != 0);
         char path[80];
-        if (usesChildFilter)
+        if (childId > 0)
             snprintf(path, sizeof(path), "%s&child=%d", queries[qi].base, childId);
         else
             strncpy(path, queries[qi].base, sizeof(path) - 1);
+
         int code;
         String body = _get(path, code);
         if (code != 200 || body.isEmpty()) continue;
@@ -362,9 +362,10 @@ int BabyBuddyAPI::getRecentRecords(BBRecentRecord records[3], int childId) {
 
         JsonObject entry = results[0].as<JsonObject>();
 
-        // For medications, filter by child client-side since the API may not support it
-        if (!usesChildFilter && childId > 0 && strcmp(queries[qi].type, "Meds") == 0) {
-            if ((int)(entry["child"] | -1) != childId) continue;
+        // Safety net: skip if the returned entry belongs to a different child
+        if (childId > 0) {
+            int entrychild = entry["child"] | -1;
+            if (entrychild > 0 && entrychild != childId) continue;
         }
 
         BBRecentRecord& r = all[count];
@@ -440,12 +441,19 @@ int BabyBuddyAPI::getRecentRecords(BBRecentRecord records[3], int childId) {
 
         } else if (strcmp(queries[qi].type, "Meds") == 0) {
             const char* name = entry["name"] | "";
-            float amount = entry["amount"] | 0.0f;
-            const char* unit = entry["amount_unit"] | "";
-            if (amount > 0.0f && unit[0])
-                snprintf(r.detail, sizeof(r.detail), "%s %.1f%s", name, amount, unit);
+            float dosage = entry["dosage"] | 0.0f;
+            const char* unit = entry["dosage_unit"] | "";
+            if (dosage > 0.0f && unit[0])
+                snprintf(r.detail, sizeof(r.detail), "%s %.1f%s", name, dosage, unit);
             else
                 strncpy(r.detail, name, sizeof(r.detail) - 1);
+
+        } else if (strcmp(queries[qi].type, "Temp") == 0) {
+            float temp = entry["temperature"] | 0.0f;
+            if (temp > 0.0f) {
+                snprintf(r.method, sizeof(r.method), "%.1f", temp);
+                snprintf(r.detail, sizeof(r.detail), "%.1f", temp);
+            }
 
         } else {
             // Sleep, Tummy — show duration

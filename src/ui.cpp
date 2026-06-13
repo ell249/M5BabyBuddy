@@ -230,6 +230,43 @@ void UI::_drawIcon(int x, int y, int type) {
             _fill(x+1, y+15, 5, 2);    // lower-left arm
             _fill(x+3, y+17, 9, 3);    // wide bottom arc
             break;
+        case 3:  // Hourglass — tummy time
+            _fill(x+0, y+0,  20, 2);
+            _fill(x+2, y+2,  16, 2);
+            _fill(x+4, y+4,  12, 2);
+            _fill(x+6, y+6,  8,  2);
+            _fill(x+8, y+8,  4,  4);   // waist
+            _fill(x+6, y+12, 8,  2);
+            _fill(x+4, y+14, 12, 2);
+            _fill(x+2, y+16, 16, 2);
+            _fill(x+0, y+18, 20, 2);
+            break;
+        case 4:  // Droplet — pumping
+            _fill(x+8, y+0,  4,  2);   // tip
+            _fill(x+7, y+2,  6,  2);
+            _fill(x+6, y+4,  8,  2);
+            _fill(x+5, y+6,  10, 2);
+            _fill(x+4, y+8,  12, 6);   // widest section
+            _fill(x+5, y+14, 10, 2);
+            _fill(x+6, y+16, 8,  2);
+            _fill(x+7, y+18, 6,  2);
+            break;
+        case 6:  // Thermometer — temperature
+            _fill(x+8, y+0,  4, 12);   // tube (solid, 4px wide)
+            _fill(x+7, y+12, 6,  1);   // shoulder top
+            _fill(x+6, y+13, 8,  5);   // bulb body
+            _fill(x+7, y+18, 6,  1);   // shoulder bottom
+            break;
+        case 5:  // Pill/capsule — solid left half, outlined right half
+            // Left half (solid)
+            _fill(x+2,  y+5,  8,  1);   // top edge   (x+2..x+9)
+            _fill(x+1,  y+6,  9,  8);   // solid body (x+1..x+9)
+            _fill(x+2,  y+14, 8,  1);   // bot edge   (x+2..x+9)
+            // Right half (outline only — interior stays paper/white)
+            _fill(x+10, y+5,  8,  1);   // top edge   (x+10..x+17)
+            _fill(x+17, y+6,  2,  8);   // right cap
+            _fill(x+10, y+14, 8,  1);   // bot edge   (x+10..x+17)
+            break;
     }
 }
 

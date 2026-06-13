@@ -728,9 +728,9 @@ static void handleMedicationSave() {
         strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%dT%H:%M:%S", tm);
         snprintf(body, sizeof(body),
                  "{\"child\":%d,\"name\":\"%s\",\"time\":\"%s\","
-                 "\"amount\":%.2f,\"amount_unit\":\"%s\"}",
+                 "\"dosage\":%.2f,\"dosage_unit\":\"%s\"}",
                  _childId, name, timeBuf, _medicationAmount, unit);
-        offlineLog("/api/medications/", body, "Saved!");
+        offlineLog("/api/medication/", body, "Saved!");
     }
 }
 

@@ -56,7 +56,7 @@ private:
     void _small(int x, int y, const char* s);        // 12pt — indicators
     int  _smallWidth(const char* s);
     void _formatElapsed(uint32_t sec, char* buf, size_t len);
-    void _drawIcon(int x, int y, int type);          // 20×20 icon: 0=bottle,1=diaper,2=moon
+    void _drawIcon(int x, int y, int type);          // 20×20 icon: 0=bottle,1=diaper,2=moon,3=hourglass,4=droplet,5=pill,6=thermometer
 };
 
 extern UI display;
