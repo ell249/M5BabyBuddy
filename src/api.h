@@ -28,6 +28,12 @@ struct BBRecentRecord {
     char   detail[32];
 };
 
+struct BBMedication {
+    char  name[32];
+    float amount;
+    char  unit[8];
+};
+
 class BabyBuddyAPI {
 public:
     void begin(const char* baseUrl, const char* token);
@@ -58,6 +64,14 @@ public:
     BBResult logPumping(int child, time_t start, time_t end, float amountMl);
     BBResult logMedication(int child, time_t when, const char* name,
                            float amount, const char* unit);
+    BBResult logTemperature(int childId, time_t when, float temp);
+
+    // Fetches last feed method (as "bl"/"br"/"bo"/"f"/"p"), last temperature, and recent unique
+    // medication names from API using SSL connection reuse (one TLS handshake). Returns med count.
+    int fetchStartupData(int childId,
+                         char* feedMethod, size_t feedLen,
+                         float* lastTemp,
+                         BBMedication* meds, int maxMeds);
 
     // Fetch the 3 most recent records for a child across all activity types; returns count (0-3)
     int getRecentRecords(BBRecentRecord records[3], int childId);

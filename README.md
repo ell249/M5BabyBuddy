@@ -10,12 +10,13 @@ Inspired by [babypod-software](https://github.com/skjdghsdjgsdj/babypod-software
 
 ### Activity logging
 
-- **Feeding** — log left breast, right breast, both, formula, or pumped milk with a running timer
+- **Feeding** — log left breast, right breast, both, formula, or pumped milk with a running timer; menu automatically defaults to the opposite breast (or repeats the last method for non-breast options)
 - **Diaper** — log wet, dirty (poo), wet+dirty, or dry
 - **Sleep** — start/stop a sleep timer; saved to Baby Buddy on stop
 - **Tummy Time** — start/stop a tummy time timer
 - **Pumping** — timer + amount entry (0–400 ml in 5 ml steps)
-- **Medication** — log a medication by name and dosage; medications pre-configured in `config.h`
+- **Medication** — log a medication by name and dosage; medications pre-configured in `config.h` and supplemented automatically from recent Baby Buddy history
+- **Temperature** — log a temperature reading (30–45°C in 0.1° steps); defaults to the last recorded temperature
 
 ### Summary screen
 
@@ -53,6 +54,7 @@ Shown on the e-ink display while the device sleeps; image persists without power
 
 - **Instant boot** — menu appears immediately using cached NVS data; WiFi connects in the background and updates the status indicator when ready
 - **Fast summary screen** — all activity queries reuse a single SSL connection (one handshake instead of seven), dramatically reducing loading time
+- **Smart defaults** — last feed method, last temperature, and recent medication names are fetched from Baby Buddy on WiFi connect (one SSL session for all three) and persisted to NVS for offline use
 
 ## Hardware
 
@@ -128,13 +130,14 @@ This device uses the Baby Buddy REST API with token authentication:
 | `POST` | `/api/tummy-times/` | Log tummy time |
 | `POST` | `/api/pumping/` | Log pumping session |
 | `POST` | `/api/medication/` | Log medication |
-| `GET` | `/api/feedings/?limit=1&child=N` | Recent records for summary screen |
-| `GET` | `/api/changes/?limit=1&child=N` | ↑ |
+| `POST` | `/api/temperature/` | Log temperature |
+| `GET` | `/api/feedings/?limit=1&child=N` | Last feed method (smart default) + summary screen |
+| `GET` | `/api/temperature/?limit=1&child=N` | Last temperature (smart default) + summary screen |
+| `GET` | `/api/medication/?limit=5&child=N` | Recent medication names (dynamic menu) |
+| `GET` | `/api/changes/?limit=1&child=N` | Recent records for summary screen |
 | `GET` | `/api/sleep/?limit=1&child=N` | ↑ |
 | `GET` | `/api/tummy-times/?limit=1&child=N` | ↑ |
 | `GET` | `/api/pumping/?limit=1&child=N` | ↑ |
-| `GET` | `/api/medication/?limit=1&child=N` | ↑ |
-| `GET` | `/api/temperature/?limit=1&child=N` | ↑ |
 
 ## License
 

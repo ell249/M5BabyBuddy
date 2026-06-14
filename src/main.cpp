@@ -42,6 +42,8 @@ enum AppState {
     ST_MEDICATION_SELECT,
     ST_MEDICATION_AMOUNT,
     ST_MEDICATION_SAVE,
+    ST_TEMP_VALUE,
+    ST_TEMP_SAVE,
     ST_ERROR,
     ST_SLEEPING,
 };
@@ -115,7 +117,13 @@ static int           _childSel       = 0;
 static const char*   _childNamePtrs[5] = {};  // up to 4 children + "Back"
 static int           _medicationIdx    = 0;
 static float         _medicationAmount = 0.0f;
-static const char*   _medicationPtrs[MEDICINE_COUNT + 1] = {};
+static const int     MED_MAX           = 8;
+static BBMedication  _meds[8]          = {};   // merged config.h + API meds
+static int           _medCount         = 0;
+static const char*   _medicationPtrs[9] = {};  // MED_MAX + 1 (names + "Back")
+static char          _lastFeedMethod[4] = "";
+static float         _lastTemp          = 0.0f;
+static float         _tempValue         = 37.0f;
 static bool          _diaperWet      = true;
 static bool          _diaperSolid    = false;
 static char          _errorMsg[80]   = "";
@@ -126,9 +134,9 @@ static unsigned long _wifiStartMs    = 0;
 
 // ── Menu definitions (≤8 chars per item for AsciiFont24x48) ──────────────────
 static const char* MAIN_ITEMS[] = {
-    "Feeding", "Diaper", "Sleep", "Tummy", "Pumping", "Medication", "Settings"
+    "Feeding", "Diaper", "Sleep", "Tummy", "Pumping", "Medication", "Temp", "Settings"
 };
-static const int MAIN_COUNT = 7;
+static const int MAIN_COUNT = 8;
 
 static const char* FEED_ITEMS[] = {
     "Left", "Right", "Both", "Formula", "Pumped", "Back"
@@ -282,6 +290,39 @@ static void onWiFiConnected() {
             if (_childName[0] == '\0') strncpy(_childName, "Baby", sizeof(_childName));
         }
     }
+    // Fetch last feed method, last temperature, and recent API medications
+    {
+        BBMedication apiMeds[4];
+        char apiFeedMethod[4] = "";
+        float apiLastTemp = 0.0f;
+        int apiMedCount = api.fetchStartupData(_childId,
+                                               apiFeedMethod, sizeof(apiFeedMethod),
+                                               &apiLastTemp, apiMeds, 4);
+        if (apiFeedMethod[0]) strncpy(_lastFeedMethod, apiFeedMethod, sizeof(_lastFeedMethod) - 1);
+        if (apiLastTemp > 0.0f) _lastTemp = apiLastTemp;
+
+        Preferences sp;
+        sp.begin("bb_state", false);
+        if (_lastFeedMethod[0]) sp.putString("lastfeed", _lastFeedMethod);
+        if (_lastTemp > 0.0f)   sp.putFloat("lasttemp", _lastTemp);
+        sp.end();
+
+        // Merge API meds into _meds[] — config.h entries take priority, API adds extras
+        for (int i = 0; i < apiMedCount && _medCount < MED_MAX; i++) {
+            bool found = false;
+            for (int j = 0; j < _medCount; j++)
+                if (strcmp(_meds[j].name, apiMeds[i].name) == 0) { found = true; break; }
+            if (!found) {
+                strncpy(_meds[_medCount].name, apiMeds[i].name, sizeof(_meds[0].name) - 1);
+                _meds[_medCount].amount = apiMeds[i].amount;
+                strncpy(_meds[_medCount].unit, apiMeds[i].unit, sizeof(_meds[0].unit) - 1);
+                _medCount++;
+            }
+        }
+        for (int i = 0; i < _medCount; i++) _medicationPtrs[i] = _meds[i].name;
+        _medicationPtrs[_medCount] = "Back";
+    }
+
     // Refresh whichever screen shows the WiFi indicator
     if (_state == ST_MAIN_MENU) {
         display.drawMenu(_childName, MAIN_ITEMS, MAIN_COUNT, _menuSel,
@@ -413,8 +454,6 @@ static void offlineLog(const char* path, const char* body, const char* successMs
 static void handleBoot() {
     display.begin();
     pinMode(PWR_BTN_PIN, INPUT_PULLUP);
-    for (int i = 0; i < MEDICINE_COUNT; i++) _medicationPtrs[i] = MEDICINE_NAMES[i];
-    _medicationPtrs[MEDICINE_COUNT] = "Back";
 
     // TZ must be set before syncSystemFromRtc so mktime() uses the correct local offset.
     // configTzTime also starts the SNTP daemon; it will sync once WiFi is up.
@@ -435,6 +474,27 @@ static void handleBoot() {
 
     // Normal (button) wakeup: load from NVS and show UI immediately — no waiting for WiFi
     api.begin(BB_BASE_URL, BB_AUTH_TOKEN);
+
+    // Build medication list from config.h, then merge API meds on WiFi connect
+    _medCount = 0;
+    for (int i = 0; i < MEDICINE_COUNT && _medCount < MED_MAX; i++) {
+        strncpy(_meds[_medCount].name, MEDICINE_NAMES[i], sizeof(_meds[0].name) - 1);
+        _meds[_medCount].amount = MEDICINE_AMOUNTS[i];
+        strncpy(_meds[_medCount].unit, MEDICINE_UNITS[i], sizeof(_meds[0].unit) - 1);
+        _medCount++;
+    }
+    for (int i = 0; i < _medCount; i++) _medicationPtrs[i] = _meds[i].name;
+    _medicationPtrs[_medCount] = "Back";
+
+    // Load persisted last-feed method and last temperature from NVS
+    {
+        Preferences sp;
+        sp.begin("bb_state", true);
+        sp.getString("lastfeed", _lastFeedMethod, sizeof(_lastFeedMethod));
+        _lastTemp = sp.getFloat("lasttemp", 0.0f);
+        sp.end();
+    }
+
     _childId = BB_CHILD_ID > 0 ? BB_CHILD_ID : api.getChildId();  // NVS read, no network
     const char* cached = api.getChildName();
     if (cached[0] != '\0') strncpy(_childName, cached, sizeof(_childName) - 1);
@@ -467,8 +527,12 @@ static void handleMainMenu(BtnEvent btn) {
     if (btn != BTN_MID) return;
     touch();
     switch (_menuSel) {
-        case 0:  // Feeding
-            _subSel = 2;
+        case 0:  // Feeding — default to opposite breast, or repeat last method
+            if      (strcmp(_lastFeedMethod, "bl") == 0) _subSel = 1;  // Last Left  → Right
+            else if (strcmp(_lastFeedMethod, "br") == 0) _subSel = 0;  // Last Right → Left
+            else if (strcmp(_lastFeedMethod, "f")  == 0) _subSel = 3;  // Last Formula → Formula
+            else if (strcmp(_lastFeedMethod, "p")  == 0) _subSel = 4;  // Last Pumped → Pumped
+            else                                          _subSel = 2;  // default: Both
             _state = ST_FEEDING_METHOD;
             display.drawMenu("Feeding", FEED_ITEMS, FEED_COUNT, _subSel);
             display.refresh(true);
@@ -497,10 +561,16 @@ static void handleMainMenu(BtnEvent btn) {
         case 5:  // Medication
             _subSel = 0;
             _state = ST_MEDICATION_SELECT;
-            display.drawMenu("Medication", _medicationPtrs, MEDICINE_COUNT + 1, _subSel);
+            display.drawMenu("Medication", _medicationPtrs, _medCount + 1, _subSel);
             display.refresh(true);
             break;
-        case 6:  // Settings
+        case 6:  // Temp
+            _tempValue = (_lastTemp > 0.0f) ? _lastTemp : 37.0f;
+            _state = ST_TEMP_VALUE;
+            display.drawNumericSelector("Temp", _tempValue, 0.1f, 30.0f, 45.0f, "C", _wifiOk);
+            display.refresh(true);
+            break;
+        case 7:  // Settings
             _subSel = 0;
             _state = ST_SETTINGS;
             display.drawMenu("Settings", SETTINGS_ITEMS, SETTINGS_COUNT, _subSel,
@@ -559,6 +629,15 @@ static void handleFeedingSave() {
     time_t end   = time(nullptr);
     if (_timer.bbTimerId > 0 && _wifiOk) api.stopTimer(_timer.bbTimerId);
     clearTimer();
+
+    // Persist feed method so next menu open shows the smart default
+    strncpy(_lastFeedMethod, _feedMethod, sizeof(_lastFeedMethod) - 1);
+    {
+        Preferences sp;
+        sp.begin("bb_state", false);
+        sp.putString("lastfeed", _lastFeedMethod);
+        sp.end();
+    }
 
     if (_wifiOk) {
         BBResult r = api.logFeeding(_childId, start, end, _feedMethod);
@@ -779,7 +858,7 @@ static void handleSettingsChild(BtnEvent btn) {
 }
 
 static void handleMedicationSelect(BtnEvent btn) {
-    int count = MEDICINE_COUNT + 1;
+    int count = _medCount + 1;
     if (btn == BTN_UP   && _subSel > 0)          _subSel--;
     if (btn == BTN_DOWN && _subSel < count - 1)  _subSel++;
     if (btn == BTN_UP || btn == BTN_DOWN) {
@@ -791,10 +870,10 @@ static void handleMedicationSelect(BtnEvent btn) {
     touch();
     if (_subSel == count - 1) { enterMainMenu(); return; }  // Back
     _medicationIdx    = _subSel;
-    _medicationAmount = MEDICINE_AMOUNTS[_medicationIdx];
+    _medicationAmount = _meds[_medicationIdx].amount;
     _state = ST_MEDICATION_AMOUNT;
-    display.drawNumericSelector(MEDICINE_NAMES[_medicationIdx], _medicationAmount,
-                                0.5f, 0.0f, 50.0f, MEDICINE_UNITS[_medicationIdx], _wifiOk);
+    display.drawNumericSelector(_meds[_medicationIdx].name, _medicationAmount,
+                                0.5f, 0.0f, 50.0f, _meds[_medicationIdx].unit, _wifiOk);
     display.refresh(true);
 }
 
@@ -802,8 +881,8 @@ static void handleMedicationAmount(BtnEvent btn) {
     if (btn == BTN_UP   && _medicationAmount < 50.0f) _medicationAmount += 0.5f;
     if (btn == BTN_DOWN && _medicationAmount > 0.0f)  _medicationAmount -= 0.5f;
     if (btn == BTN_UP || btn == BTN_DOWN) {
-        display.drawNumericSelector(MEDICINE_NAMES[_medicationIdx], _medicationAmount,
-                                    0.5f, 0.0f, 50.0f, MEDICINE_UNITS[_medicationIdx], _wifiOk);
+        display.drawNumericSelector(_meds[_medicationIdx].name, _medicationAmount,
+                                    0.5f, 0.0f, 50.0f, _meds[_medicationIdx].unit, _wifiOk);
         display.refresh(); touch(); return;
     }
     if (btn == BTN_MID_LONG) { enterMainMenu(); return; }
@@ -814,8 +893,8 @@ static void handleMedicationAmount(BtnEvent btn) {
 
 static void handleMedicationSave() {
     time_t now    = time(nullptr);
-    const char* name = MEDICINE_NAMES[_medicationIdx];
-    const char* unit = MEDICINE_UNITS[_medicationIdx];
+    const char* name = _meds[_medicationIdx].name;
+    const char* unit = _meds[_medicationIdx].unit;
 
     if (_wifiOk) {
         BBResult r = api.logMedication(_childId, now, name, _medicationAmount, unit);
@@ -829,6 +908,47 @@ static void handleMedicationSave() {
                  "\"dosage\":%.2f,\"dosage_unit\":\"%s\"}",
                  _childId, name, timeBuf, _medicationAmount, unit);
         offlineLog("/api/medication/", body, "Saved!");
+    }
+}
+
+static void handleTempValue(BtnEvent btn) {
+    if (btn == BTN_UP   && _tempValue < 45.0f)
+        _tempValue = roundf((_tempValue + 0.1f) * 10.0f) / 10.0f;
+    if (btn == BTN_DOWN && _tempValue > 30.0f)
+        _tempValue = roundf((_tempValue - 0.1f) * 10.0f) / 10.0f;
+    if (btn == BTN_UP || btn == BTN_DOWN) {
+        display.drawNumericSelector("Temp", _tempValue, 0.1f, 30.0f, 45.0f, "C", _wifiOk);
+        display.refresh(); touch(); return;
+    }
+    if (btn == BTN_MID_LONG) { enterMainMenu(); return; }
+    if (btn != BTN_MID) return;
+    touch();
+    _state = ST_TEMP_SAVE;
+}
+
+static void handleTempSave() {
+    time_t now = time(nullptr);
+
+    // Persist last temperature so next entry defaults to it
+    _lastTemp = _tempValue;
+    {
+        Preferences sp;
+        sp.begin("bb_state", false);
+        sp.putFloat("lasttemp", _lastTemp);
+        sp.end();
+    }
+
+    if (_wifiOk) {
+        BBResult r = api.logTemperature(_childId, now, _tempValue);
+        finishWithStatus("Saved!", r.ok, r.httpCode);
+    } else {
+        char timeBuf[24], body[128];
+        struct tm* tmP = localtime(&now);
+        strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%dT%H:%M:%S", tmP);
+        snprintf(body, sizeof(body),
+                 "{\"child\":%d,\"temperature\":%.1f,\"time\":\"%s\"}",
+                 _childId, _tempValue, timeBuf);
+        offlineLog("/api/temperature/", body, "Saved!");
     }
 }
 
@@ -906,6 +1026,13 @@ void loop() {
             break;
         case ST_MEDICATION_SAVE:
             handleMedicationSave();
+            break;
+        case ST_TEMP_VALUE:
+            if (btn != BTN_NONE) handleTempValue(btn);
+            if (_state == ST_TEMP_SAVE) handleTempSave();
+            break;
+        case ST_TEMP_SAVE:
+            handleTempSave();
             break;
         case ST_ERROR:
             if (btn == BTN_MID || btn == BTN_MID_LONG) enterMainMenu();

@@ -326,6 +326,91 @@ BBResult BabyBuddyAPI::logMedication(int child, time_t when, const char* name,
     return _post("/api/medication/", body);
 }
 
+BBResult BabyBuddyAPI::logTemperature(int childId, time_t when, float temp) {
+    char t[24]; _isoTime(when, t, sizeof(t));
+    char body[128];
+    snprintf(body, sizeof(body),
+             "{\"child\":%d,\"temperature\":%.1f,\"time\":\"%s\"}",
+             childId, temp, t);
+    return _post("/api/temperature/", body);
+}
+
+// Fetches last feed method, last temperature, and recent unique medications
+// using a single SSL session (one TLS handshake for 3 requests).
+int BabyBuddyAPI::fetchStartupData(int childId,
+                                    char* feedMethod, size_t feedLen,
+                                    float* lastTemp,
+                                    BBMedication* meds, int maxMeds) {
+    feedMethod[0] = '\0';
+    *lastTemp = 0.0f;
+    int medCount = 0;
+
+    struct { const char* base; int tag; } queries[] = {
+        { "/api/feedings/?limit=1",   0 },
+        { "/api/temperature/?limit=1",1 },
+        { "/api/medication/?limit=5", 2 },
+    };
+
+    bool isHttps = _isHttps(_baseUrl);
+    WiFiClientSecure secureClient;
+    if (isHttps) secureClient.setInsecure();
+    HTTPClient http;
+    http.setReuse(true);
+
+    for (int qi = 0; qi < 3; qi++) {
+        char path[80];
+        if (childId > 0)
+            snprintf(path, sizeof(path), "%s&child=%d", queries[qi].base, childId);
+        else
+            strncpy(path, queries[qi].base, sizeof(path) - 1);
+
+        char url[192];
+        snprintf(url, sizeof(url), "%s%s", _baseUrl, path);
+        bool begun = isHttps ? http.begin(secureClient, url) : http.begin(url);
+        if (!begun) continue;
+        http.addHeader("Authorization", _authHeader);
+        int code = http.GET();
+        String body = (code > 0) ? http.getString() : "";
+        http.end();
+        if (code != 200 || body.isEmpty()) continue;
+
+        JsonDocument doc;
+        if (deserializeJson(doc, body) != DeserializationError::Ok) continue;
+        JsonArray results = doc["results"].as<JsonArray>();
+        if (results.size() == 0) continue;
+
+        if (queries[qi].tag == 0) {  // last feeding → method abbreviation
+            const char* method = results[0]["method"] | "";
+            const char* type   = results[0]["type"]   | "";
+            if      (strcmp(method, "left breast")  == 0) strncpy(feedMethod, "bl", feedLen);
+            else if (strcmp(method, "right breast") == 0) strncpy(feedMethod, "br", feedLen);
+            else if (strcmp(method, "both breasts") == 0) strncpy(feedMethod, "bo", feedLen);
+            else if (strcmp(method, "bottle") == 0)
+                strncpy(feedMethod, strcmp(type, "formula") == 0 ? "f" : "p", feedLen);
+
+        } else if (queries[qi].tag == 1) {  // last temperature
+            float t = results[0]["temperature"] | 0.0f;
+            if (t > 0.0f) *lastTemp = t;
+
+        } else {  // recent medications — collect unique names
+            for (JsonObject entry : results) {
+                if (medCount >= maxMeds) break;
+                const char* name = entry["name"] | "";
+                if (!name[0]) continue;
+                bool found = false;
+                for (int i = 0; i < medCount; i++)
+                    if (strcmp(meds[i].name, name) == 0) { found = true; break; }
+                if (found) continue;
+                strncpy(meds[medCount].name, name, sizeof(meds[0].name) - 1);
+                meds[medCount].amount = entry["dosage"] | 0.0f;
+                strncpy(meds[medCount].unit, entry["dosage_unit"] | "", sizeof(meds[0].unit) - 1);
+                medCount++;
+            }
+        }
+    }
+    return medCount;
+}
+
 // ── Recent records for summary screen ────────────────────────────────────────
 
 int BabyBuddyAPI::getRecentRecords(BBRecentRecord records[3], int childId) {
