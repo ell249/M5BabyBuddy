@@ -50,6 +50,7 @@ enum AppState {
 
 // ── Persistent timer state ────────────────────────────────────────────────────
 static const char TIMER_NS[]      = "bb_timer";
+static const char SREC_NS[]       = "bb_srec";
 static const char TIMER_ACT_KEY[] = "act";
 static const char TIMER_T_KEY[]   = "start";
 static const char TIMER_ID_KEY[]  = "bbid";
@@ -332,6 +333,36 @@ static void onWiFiConnected() {
     }
 }
 
+// ── Recent-record NVS cache (lets sleep summary show advancing times offline) ─
+static void saveRecentRecords(BBRecentRecord* recs, int count) {
+    Preferences p;
+    p.begin(SREC_NS, false);
+    p.putInt("cnt", count);
+    for (int i = 0; i < count; i++) {
+        char k[5];
+        snprintf(k, sizeof(k), "ts%d", i); p.putLong(k,   (long)recs[i].timestamp);
+        snprintf(k, sizeof(k), "ic%d", i); p.putInt(k,    recs[i].iconType);
+        snprintf(k, sizeof(k), "tm%d", i); p.putString(k, recs[i].timeStr);
+        snprintf(k, sizeof(k), "me%d", i); p.putString(k, recs[i].method);
+    }
+    p.end();
+}
+
+static int loadRecentRecords(BBRecentRecord* recs) {
+    Preferences p;
+    p.begin(SREC_NS, true);
+    int count = p.getInt("cnt", 0);
+    for (int i = 0; i < count; i++) {
+        char k[5];
+        snprintf(k, sizeof(k), "ts%d", i); recs[i].timestamp = (time_t)p.getLong(k, 0);
+        snprintf(k, sizeof(k), "ic%d", i); recs[i].iconType  = p.getInt(k, 0);
+        snprintf(k, sizeof(k), "tm%d", i); p.getString(k, recs[i].timeStr, sizeof(recs[i].timeStr));
+        snprintf(k, sizeof(k), "me%d", i); p.getString(k, recs[i].method,  sizeof(recs[i].method));
+    }
+    p.end();
+    return count;
+}
+
 // ── Deep sleep with summary screen ───────────────────────────────────────────
 static void goToSleep() {
     _state = ST_SLEEPING;
@@ -343,6 +374,11 @@ static void goToSleep() {
 
     BBRecentRecord recs[3] = {};
     int recCount = _wifiOk ? api.getRecentRecords(recs, _childId) : 0;
+    if (recCount > 0) {
+        saveRecentRecords(recs, recCount);   // keep a copy so offline wakeups can show advancing times
+    } else {
+        recCount = loadRecentRecords(recs);  // fall back to cached records; formatAgo uses current RTC
+    }
 
     int batPct = getBatPercent();
     time_t now = time(nullptr);
