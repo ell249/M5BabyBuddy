@@ -27,10 +27,12 @@ public:
     void drawError(const char* title, const char* msg);
     void drawHeader(const char* name, bool wifiOk, int offlineCount = 0);
     void drawMenu(const char* title, const char** items, int count, int selected,
-                  bool wifiOk = true, int offlineCount = 0);
+                  bool wifiOk = true, int offlineCount = 0,
+                  const char* subLabel = nullptr);
     void drawTimer(const char* activity, uint32_t elapsedSec, bool wifiOk = true);
     void drawNumericSelector(const char* label, float value, float step,
-                             float minVal, float maxVal, const char* unit, bool wifiOk = true);
+                             float minVal, float maxVal, const char* unit,
+                             bool wifiOk = true, const char* lastStr = nullptr);
 
     struct SummaryRecord {
         int  iconType;    // 0=feeding, 1=diaper, 2=sleep
@@ -54,6 +56,7 @@ private:
     void _huge(int x, int y, const char* s);         // 24pt — timer/values
     void _hugeCenter(int y, const char* s);
     void _small(int x, int y, const char* s);        // 12pt — indicators
+    void _smallCenter(int y, const char* s);
     int  _smallWidth(const char* s);
     void _formatElapsed(uint32_t sec, char* buf, size_t len);
     void _drawIcon(int x, int y, int type);          // 20×20 icon: 0=bottle,1=diaper,2=moon,3=hourglass,4=droplet,5=pill,6=thermometer

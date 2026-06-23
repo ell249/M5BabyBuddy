@@ -51,6 +51,7 @@ enum AppState {
 // ── Persistent timer state ────────────────────────────────────────────────────
 static const char TIMER_NS[]      = "bb_timer";
 static const char SREC_NS[]       = "bb_srec";
+static const char MTIME_NS[]      = "bb_mtime";
 static const char TIMER_ACT_KEY[] = "act";
 static const char TIMER_T_KEY[]   = "start";
 static const char TIMER_ID_KEY[]  = "bbid";
@@ -267,6 +268,8 @@ static void syncRtcFromSystem() {
     M5.Rtc.SetDate(&ds);
 }
 
+static void saveMedLastTimes();  // forward — defined after goToSleep
+
 // ── Async WiFi ────────────────────────────────────────────────────────────────
 
 static void startWiFiAsync() {
@@ -311,17 +314,23 @@ static void onWiFiConnected() {
         // Merge API meds into _meds[] — config.h entries take priority, API adds extras
         for (int i = 0; i < apiMedCount && _medCount < MED_MAX; i++) {
             bool found = false;
-            for (int j = 0; j < _medCount; j++)
-                if (strcmp(_meds[j].name, apiMeds[i].name) == 0) { found = true; break; }
+            for (int j = 0; j < _medCount; j++) {
+                if (strcmp(_meds[j].name, apiMeds[i].name) == 0) {
+                    _meds[j].lastTime = apiMeds[i].lastTime;  // update last dose time
+                    found = true; break;
+                }
+            }
             if (!found) {
                 strncpy(_meds[_medCount].name, apiMeds[i].name, sizeof(_meds[0].name) - 1);
-                _meds[_medCount].amount = apiMeds[i].amount;
+                _meds[_medCount].amount   = apiMeds[i].amount;
                 strncpy(_meds[_medCount].unit, apiMeds[i].unit, sizeof(_meds[0].unit) - 1);
+                _meds[_medCount].lastTime = apiMeds[i].lastTime;
                 _medCount++;
             }
         }
         for (int i = 0; i < _medCount; i++) _medicationPtrs[i] = _meds[i].name;
         _medicationPtrs[_medCount] = "Back";
+        saveMedLastTimes();
     }
 
     // Refresh whichever screen shows the WiFi indicator
@@ -331,6 +340,47 @@ static void onWiFiConnected() {
         display.refresh(true);
         touch();
     }
+}
+
+// ── Medication last-dose time NVS cache ───────────────────────────────────────
+
+static void saveMedLastTimes() {
+    Preferences p;
+    p.begin(MTIME_NS, false);
+    int cnt = 0;
+    for (int i = 0; i < _medCount; i++) {
+        if (_meds[i].lastTime <= 0) continue;
+        char kn[5], kt[5];
+        snprintf(kn, sizeof(kn), "nm%d", cnt);
+        snprintf(kt, sizeof(kt), "lt%d", cnt);
+        p.putString(kn, _meds[i].name);
+        p.putLong(kt, (long)_meds[i].lastTime);
+        cnt++;
+    }
+    p.putInt("cnt", cnt);
+    p.end();
+}
+
+static void loadMedLastTimes() {
+    Preferences p;
+    p.begin(MTIME_NS, true);
+    int cnt = p.getInt("cnt", 0);
+    for (int i = 0; i < cnt; i++) {
+        char kn[5], kt[5];
+        snprintf(kn, sizeof(kn), "nm%d", i);
+        snprintf(kt, sizeof(kt), "lt%d", i);
+        char name[33] = "";
+        p.getString(kn, name, sizeof(name));
+        long t = p.getLong(kt, 0);
+        if (!name[0] || t <= 0) continue;
+        for (int j = 0; j < _medCount; j++) {
+            if (strcmp(_meds[j].name, name) == 0) {
+                _meds[j].lastTime = (time_t)t;
+                break;
+            }
+        }
+    }
+    p.end();
 }
 
 // ── Recent-record NVS cache (lets sleep summary show advancing times offline) ─
@@ -521,6 +571,7 @@ static void handleBoot() {
     }
     for (int i = 0; i < _medCount; i++) _medicationPtrs[i] = _meds[i].name;
     _medicationPtrs[_medCount] = "Back";
+    loadMedLastTimes();  // restore last-dose times from NVS (available before WiFi)
 
     // Load persisted last-feed method and last temperature from NVS
     {
@@ -550,6 +601,8 @@ static void handleBoot() {
         enterMainMenu();
     }
 }
+
+static void _medSubLabel(int idx, char* buf, size_t len);  // forward — defined before handleMedicationSelect
 
 // ── State handlers ────────────────────────────────────────────────────────────
 static void handleMainMenu(BtnEvent btn) {
@@ -597,7 +650,11 @@ static void handleMainMenu(BtnEvent btn) {
         case 5:  // Medication
             _subSel = 0;
             _state = ST_MEDICATION_SELECT;
-            display.drawMenu("Medication", _medicationPtrs, _medCount + 1, _subSel);
+            {
+                char sub[20]; _medSubLabel(0, sub, sizeof(sub));
+                display.drawMenu("Medication", _medicationPtrs, _medCount + 1, _subSel,
+                                 true, 0, sub[0] ? sub : nullptr);
+            }
             display.refresh(true);
             break;
         case 6:  // Temp
@@ -893,12 +950,22 @@ static void handleSettingsChild(BtnEvent btn) {
     touch();
 }
 
+static void _medSubLabel(int idx, char* buf, size_t len) {
+    buf[0] = '\0';
+    if (idx >= _medCount || _meds[idx].lastTime <= 0) return;
+    char ago[12];
+    formatAgo(_meds[idx].lastTime, time(nullptr), ago, sizeof(ago));
+    snprintf(buf, len, "%s ago", ago);
+}
+
 static void handleMedicationSelect(BtnEvent btn) {
     int count = _medCount + 1;
     if (btn == BTN_UP   && _subSel > 0)          _subSel--;
     if (btn == BTN_DOWN && _subSel < count - 1)  _subSel++;
     if (btn == BTN_UP || btn == BTN_DOWN) {
-        display.drawMenu("Medication", _medicationPtrs, count, _subSel);
+        char sub[20]; _medSubLabel(_subSel, sub, sizeof(sub));
+        display.drawMenu("Medication", _medicationPtrs, count, _subSel,
+                         true, 0, sub[0] ? sub : nullptr);
         display.refresh(); touch(); return;
     }
     if (btn == BTN_MID_LONG) { enterMainMenu(); return; }
@@ -908,8 +975,10 @@ static void handleMedicationSelect(BtnEvent btn) {
     _medicationIdx    = _subSel;
     _medicationAmount = _meds[_medicationIdx].amount;
     _state = ST_MEDICATION_AMOUNT;
+    char last[20]; _medSubLabel(_medicationIdx, last, sizeof(last));
     display.drawNumericSelector(_meds[_medicationIdx].name, _medicationAmount,
-                                0.5f, 0.0f, 50.0f, _meds[_medicationIdx].unit, _wifiOk);
+                                0.5f, 0.0f, 50.0f, _meds[_medicationIdx].unit, _wifiOk,
+                                last[0] ? last : nullptr);
     display.refresh(true);
 }
 
@@ -917,8 +986,10 @@ static void handleMedicationAmount(BtnEvent btn) {
     if (btn == BTN_UP   && _medicationAmount < 50.0f) _medicationAmount += 0.5f;
     if (btn == BTN_DOWN && _medicationAmount > 0.0f)  _medicationAmount -= 0.5f;
     if (btn == BTN_UP || btn == BTN_DOWN) {
+        char last[20]; _medSubLabel(_medicationIdx, last, sizeof(last));
         display.drawNumericSelector(_meds[_medicationIdx].name, _medicationAmount,
-                                    0.5f, 0.0f, 50.0f, _meds[_medicationIdx].unit, _wifiOk);
+                                    0.5f, 0.0f, 50.0f, _meds[_medicationIdx].unit, _wifiOk,
+                                    last[0] ? last : nullptr);
         display.refresh(); touch(); return;
     }
     if (btn == BTN_MID_LONG) { enterMainMenu(); return; }
@@ -931,6 +1002,10 @@ static void handleMedicationSave() {
     time_t now    = time(nullptr);
     const char* name = _meds[_medicationIdx].name;
     const char* unit = _meds[_medicationIdx].unit;
+
+    // Record dose time immediately so the next visit shows the correct interval
+    _meds[_medicationIdx].lastTime = now;
+    saveMedLastTimes();
 
     if (_wifiOk) {
         BBResult r = api.logMedication(_childId, now, name, _medicationAmount, unit);

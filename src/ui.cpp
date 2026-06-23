@@ -85,6 +85,13 @@ void UI::_small(int x, int y, const char* s) {
     static_cast<M5Canvas*>(_sprite)->drawString(s, x, y);
 }
 
+void UI::_smallCenter(int y, const char* s) {
+    int w = _smallWidth(s);
+    int x = (DISPLAY_W - w) / 2;
+    if (x < TEXT_LEFT) x = TEXT_LEFT;
+    _small(x, y, s);
+}
+
 int UI::_smallWidth(const char* s) {
     _sprite->setFont(&fonts::FreeSansBold12pt7b);
     return (int)_sprite->textWidth(s);
@@ -117,17 +124,24 @@ void UI::drawHeader(const char* name, bool wifiOk, int offlineCount) {
 // ── Menu — one item per page ──────────────────────────────────────────────────
 
 void UI::drawMenu(const char* title, const char** items, int count, int selected,
-                  bool wifiOk, int offlineCount) {
+                  bool wifiOk, int offlineCount, const char* subLabel) {
     if (!_sprite) return;
     drawHeader(title, wifiOk, offlineCount);
 
-    // Item centered horizontally and vertically in content area
     // Reserve SMALL_H+4 at bottom for position indicator
     int availH = DISPLAY_H - CONTENT_Y - SMALL_H - 6;
-    int itemY  = CONTENT_Y + (availH - BIG_H) / 2;
-    _bigCenter(itemY, items[selected]);
+    int itemY;
+    if (subLabel && subLabel[0]) {
+        // Centre the name+subLabel block together
+        int blockH = BIG_H + 4 + SMALL_H;
+        itemY = CONTENT_Y + (availH - blockH) / 2;
+        _bigCenter(itemY, items[selected]);
+        _smallCenter(itemY + BIG_H + 4, subLabel);
+    } else {
+        itemY = CONTENT_Y + (availH - BIG_H) / 2;
+        _bigCenter(itemY, items[selected]);
+    }
 
-    // Position indicator bottom-right in small font
     char pg[8];
     snprintf(pg, sizeof(pg), "%d/%d", selected + 1, count);
     int pgW = _smallWidth(pg);
@@ -189,7 +203,8 @@ void UI::drawTimer(const char* activity, uint32_t elapsedSec, bool wifiOk) {
 
 void UI::drawNumericSelector(const char* label, float value,
                               float step, float minVal, float maxVal,
-                              const char* unit, bool wifiOk) {
+                              const char* unit, bool wifiOk,
+                              const char* lastStr) {
     if (!_sprite) return;
     drawHeader(label, wifiOk, 0);
 
@@ -204,6 +219,11 @@ void UI::drawNumericSelector(const char* label, float value,
     char rangeBuf[24];
     snprintf(rangeBuf, sizeof(rangeBuf), "%.0f-%.0f %s", minVal, maxVal, unit);
     _small(TEXT_LEFT, DISPLAY_H - SMALL_H - 2, rangeBuf);
+
+    if (lastStr && lastStr[0]) {
+        int lw = _smallWidth(lastStr);
+        _small(DISPLAY_W - lw - TEXT_LEFT, DISPLAY_H - SMALL_H - 2, lastStr);
+    }
 }
 
 // ── Sleep summary screen ──────────────────────────────────────────────────────

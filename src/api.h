@@ -29,9 +29,10 @@ struct BBRecentRecord {
 };
 
 struct BBMedication {
-    char  name[32];
-    float amount;
-    char  unit[8];
+    char   name[32];
+    float  amount;
+    char   unit[8];
+    time_t lastTime;  // epoch of most recent dose, 0 if unknown
 };
 
 class BabyBuddyAPI {

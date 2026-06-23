@@ -402,8 +402,19 @@ int BabyBuddyAPI::fetchStartupData(int childId,
                     if (strcmp(meds[i].name, name) == 0) { found = true; break; }
                 if (found) continue;
                 strncpy(meds[medCount].name, name, sizeof(meds[0].name) - 1);
-                meds[medCount].amount = entry["dosage"] | 0.0f;
+                meds[medCount].amount   = entry["dosage"] | 0.0f;
                 strncpy(meds[medCount].unit, entry["dosage_unit"] | "", sizeof(meds[0].unit) - 1);
+                meds[medCount].lastTime = 0;
+                const char* tStr = entry["time"] | "";
+                if (tStr[0]) {
+                    struct tm tmE = {};
+                    if (sscanf(tStr, "%d-%d-%dT%d:%d:%d",
+                               &tmE.tm_year, &tmE.tm_mon, &tmE.tm_mday,
+                               &tmE.tm_hour, &tmE.tm_min, &tmE.tm_sec) == 6) {
+                        tmE.tm_year -= 1900; tmE.tm_mon -= 1; tmE.tm_isdst = -1;
+                        meds[medCount].lastTime = mktime(&tmE);
+                    }
+                }
                 medCount++;
             }
         }
