@@ -589,6 +589,12 @@ int BabyBuddyAPI::getRecentRecords(BBRecentRecord records[3], int childId) {
             else
                 strncpy(r.detail, name, sizeof(r.detail) - 1);
             strncpy(r.method, name, sizeof(r.method) - 1);  // up to 7 chars of med name
+            const char* ndi = entry["next_dose_interval"] | "";
+            if (ndi[0]) {
+                int h = 0, m = 0, s = 0;
+                sscanf(ndi, "%d:%d:%d", &h, &m, &s);
+                r.nextDoseSec = (uint32_t)(h * 3600 + m * 60 + s);
+            }
 
         } else if (strcmp(queries[qi].type, "Temp") == 0) {
             float temp = entry["temperature"] | 0.0f;

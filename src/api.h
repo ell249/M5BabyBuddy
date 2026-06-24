@@ -20,12 +20,13 @@ struct BBResult {
 };
 
 struct BBRecentRecord {
-    char   type[12];      // "Feed","Diap","Sleep","Tummy","Pump","Meds","Temp"
-    int    iconType;      // 0=bottle,1=diaper,2=moon,3=hourglass,4=droplet,5=pill,6=thermometer
-    char   timeStr[8];    // "HH:MM"
-    time_t timestamp;     // epoch of the record start (0 if unavailable)
-    char   method[8];     // feed: "L","R","B","F","P"; temp: "38.2"; empty otherwise
-    char   detail[32];
+    char     type[12];        // "Feed","Diap","Sleep","Tummy","Pump","Meds","Temp"
+    int      iconType;        // 0=bottle,1=diaper,2=moon,3=hourglass,4=droplet,5=pill,6=thermometer
+    char     timeStr[8];      // "HH:MM"
+    time_t   timestamp;       // epoch of the record start (0 if unavailable)
+    char     method[8];       // feed: "L","R","B","F","P"; temp: "38.2"; empty otherwise
+    char     detail[32];
+    uint32_t nextDoseSec;     // medication only: next_dose_interval in seconds, 0 otherwise
 };
 
 struct BBMedication {

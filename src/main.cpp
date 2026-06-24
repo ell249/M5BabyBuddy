@@ -401,6 +401,7 @@ static void saveRecentRecords(BBRecentRecord* recs, int count) {
         snprintf(k, sizeof(k), "ic%d", i); p.putInt(k,    recs[i].iconType);
         snprintf(k, sizeof(k), "tm%d", i); p.putString(k, recs[i].timeStr);
         snprintf(k, sizeof(k), "me%d", i); p.putString(k, recs[i].method);
+        snprintf(k, sizeof(k), "nd%d", i); p.putUInt(k,   recs[i].nextDoseSec);
     }
     p.end();
 }
@@ -411,10 +412,11 @@ static int loadRecentRecords(BBRecentRecord* recs) {
     int count = p.getInt("cnt", 0);
     for (int i = 0; i < count; i++) {
         char k[5];
-        snprintf(k, sizeof(k), "ts%d", i); recs[i].timestamp = (time_t)p.getLong(k, 0);
-        snprintf(k, sizeof(k), "ic%d", i); recs[i].iconType  = p.getInt(k, 0);
+        snprintf(k, sizeof(k), "ts%d", i); recs[i].timestamp   = (time_t)p.getLong(k, 0);
+        snprintf(k, sizeof(k), "ic%d", i); recs[i].iconType     = p.getInt(k, 0);
         snprintf(k, sizeof(k), "tm%d", i); p.getString(k, recs[i].timeStr, sizeof(recs[i].timeStr));
         snprintf(k, sizeof(k), "me%d", i); p.getString(k, recs[i].method,  sizeof(recs[i].method));
+        snprintf(k, sizeof(k), "nd%d", i); recs[i].nextDoseSec  = p.getUInt(k, 0);
     }
     p.end();
     return count;
@@ -444,6 +446,16 @@ static void goToSleep() {
     for (int i = 0; i < recCount; i++) {
         srecs[i].iconType = recs[i].iconType;
         formatAgo(recs[i].timestamp, now, srecs[i].relTime, sizeof(srecs[i].relTime));
+        // Medication overdue indicator
+        if (recs[i].iconType == 5 && recs[i].nextDoseSec > 0 &&
+            recs[i].timestamp > 0 && now > recs[i].timestamp &&
+            (uint32_t)(now - recs[i].timestamp) >= recs[i].nextDoseSec) {
+            size_t l = strlen(srecs[i].relTime);
+            if (l + 2 <= sizeof(srecs[i].relTime) - 1) {
+                srecs[i].relTime[l]   = '+';
+                srecs[i].relTime[l+1] = '\0';
+            }
+        }
         if (recs[i].method[0]) {
             snprintf(srecs[i].absTime, sizeof(srecs[i].absTime),
                      "%s %s", recs[i].timeStr, recs[i].method);
