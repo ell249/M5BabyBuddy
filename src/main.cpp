@@ -316,15 +316,17 @@ static void onWiFiConnected() {
             bool found = false;
             for (int j = 0; j < _medCount; j++) {
                 if (strcmp(_meds[j].name, apiMeds[i].name) == 0) {
-                    _meds[j].lastTime = apiMeds[i].lastTime;  // update last dose time
+                    _meds[j].lastTime    = apiMeds[i].lastTime;
+                    _meds[j].intervalSec = apiMeds[i].intervalSec;
                     found = true; break;
                 }
             }
             if (!found) {
                 strncpy(_meds[_medCount].name, apiMeds[i].name, sizeof(_meds[0].name) - 1);
-                _meds[_medCount].amount   = apiMeds[i].amount;
+                _meds[_medCount].amount      = apiMeds[i].amount;
                 strncpy(_meds[_medCount].unit, apiMeds[i].unit, sizeof(_meds[0].unit) - 1);
-                _meds[_medCount].lastTime = apiMeds[i].lastTime;
+                _meds[_medCount].lastTime    = apiMeds[i].lastTime;
+                _meds[_medCount].intervalSec = apiMeds[i].intervalSec;
                 _medCount++;
             }
         }
@@ -349,12 +351,14 @@ static void saveMedLastTimes() {
     p.begin(MTIME_NS, false);
     int cnt = 0;
     for (int i = 0; i < _medCount; i++) {
-        if (_meds[i].lastTime <= 0) continue;
-        char kn[5], kt[5];
+        if (_meds[i].lastTime <= 0 && _meds[i].intervalSec == 0) continue;
+        char kn[5], kt[5], ki[5];
         snprintf(kn, sizeof(kn), "nm%d", cnt);
         snprintf(kt, sizeof(kt), "lt%d", cnt);
+        snprintf(ki, sizeof(ki), "iv%d", cnt);
         p.putString(kn, _meds[i].name);
         p.putLong(kt, (long)_meds[i].lastTime);
+        p.putUInt(ki, _meds[i].intervalSec);
         cnt++;
     }
     p.putInt("cnt", cnt);
@@ -366,16 +370,19 @@ static void loadMedLastTimes() {
     p.begin(MTIME_NS, true);
     int cnt = p.getInt("cnt", 0);
     for (int i = 0; i < cnt; i++) {
-        char kn[5], kt[5];
+        char kn[5], kt[5], ki[5];
         snprintf(kn, sizeof(kn), "nm%d", i);
         snprintf(kt, sizeof(kt), "lt%d", i);
+        snprintf(ki, sizeof(ki), "iv%d", i);
         char name[33] = "";
         p.getString(kn, name, sizeof(name));
-        long t = p.getLong(kt, 0);
-        if (!name[0] || t <= 0) continue;
+        if (!name[0]) continue;
+        long t  = p.getLong(kt, 0);
+        uint32_t iv = p.getUInt(ki, 0);
         for (int j = 0; j < _medCount; j++) {
             if (strcmp(_meds[j].name, name) == 0) {
-                _meds[j].lastTime = (time_t)t;
+                if (t  > 0)  _meds[j].lastTime    = (time_t)t;
+                if (iv > 0)  _meds[j].intervalSec = iv;
                 break;
             }
         }
@@ -602,7 +609,8 @@ static void handleBoot() {
     }
 }
 
-static void _medSubLabel(int idx, char* buf, size_t len);  // forward — defined before handleMedicationSelect
+static void _medSubLabel(int idx, char* buf, size_t len);   // forward — defined before handleMedicationSelect
+static void _medLastLabel(int idx, char* buf, size_t len);  // forward
 
 // ── State handlers ────────────────────────────────────────────────────────────
 static void handleMainMenu(BtnEvent btn) {
@@ -651,9 +659,11 @@ static void handleMainMenu(BtnEvent btn) {
             _subSel = 0;
             _state = ST_MEDICATION_SELECT;
             {
-                char sub[20]; _medSubLabel(0, sub, sizeof(sub));
+                char sub1[20], sub2[24];
+                _medSubLabel(0, sub1, sizeof(sub1));
+                _medLastLabel(0, sub2, sizeof(sub2));
                 display.drawMenu("Medication", _medicationPtrs, _medCount + 1, _subSel,
-                                 true, 0, sub[0] ? sub : nullptr);
+                                 true, 0, sub1[0] ? sub1 : nullptr, sub2[0] ? sub2 : nullptr);
             }
             display.refresh(true);
             break;
@@ -952,10 +962,25 @@ static void handleSettingsChild(BtnEvent btn) {
 
 static void _medSubLabel(int idx, char* buf, size_t len) {
     buf[0] = '\0';
+    if (idx >= _medCount || _meds[idx].intervalSec == 0) return;
+    uint32_t sec = _meds[idx].intervalSec;
+    uint32_t h   = sec / 3600;
+    uint32_t m   = (sec % 3600) / 60;
+    if (h > 0 && m > 0) snprintf(buf, len, "every %uh%um", h, m);
+    else if (h > 0)     snprintf(buf, len, "every %uh", h);
+    else                snprintf(buf, len, "every %um", m);
+}
+
+static void _medLastLabel(int idx, char* buf, size_t len) {
+    buf[0] = '\0';
     if (idx >= _medCount || _meds[idx].lastTime <= 0) return;
+    time_t now = time(nullptr);
+    if (now <= _meds[idx].lastTime) return;
     char ago[12];
-    formatAgo(_meds[idx].lastTime, time(nullptr), ago, sizeof(ago));
-    snprintf(buf, len, "%s ago", ago);
+    formatAgo(_meds[idx].lastTime, now, ago, sizeof(ago));
+    bool due = (_meds[idx].intervalSec > 0) &&
+               ((uint32_t)(now - _meds[idx].lastTime) >= _meds[idx].intervalSec);
+    snprintf(buf, len, due ? "%s ago +" : "%s ago", ago);
 }
 
 static void handleMedicationSelect(BtnEvent btn) {
@@ -963,9 +988,11 @@ static void handleMedicationSelect(BtnEvent btn) {
     if (btn == BTN_UP   && _subSel > 0)          _subSel--;
     if (btn == BTN_DOWN && _subSel < count - 1)  _subSel++;
     if (btn == BTN_UP || btn == BTN_DOWN) {
-        char sub[20]; _medSubLabel(_subSel, sub, sizeof(sub));
+        char sub1[20], sub2[24];
+        _medSubLabel(_subSel, sub1, sizeof(sub1));
+        _medLastLabel(_subSel, sub2, sizeof(sub2));
         display.drawMenu("Medication", _medicationPtrs, count, _subSel,
-                         true, 0, sub[0] ? sub : nullptr);
+                         true, 0, sub1[0] ? sub1 : nullptr, sub2[0] ? sub2 : nullptr);
         display.refresh(); touch(); return;
     }
     if (btn == BTN_MID_LONG) { enterMainMenu(); return; }
@@ -975,10 +1002,15 @@ static void handleMedicationSelect(BtnEvent btn) {
     _medicationIdx    = _subSel;
     _medicationAmount = _meds[_medicationIdx].amount;
     _state = ST_MEDICATION_AMOUNT;
-    char last[20]; _medSubLabel(_medicationIdx, last, sizeof(last));
-    display.drawNumericSelector(_meds[_medicationIdx].name, _medicationAmount,
-                                0.5f, 0.0f, 50.0f, _meds[_medicationIdx].unit, _wifiOk,
-                                last[0] ? last : nullptr);
+    {
+        char intStr[20], lstStr[24];
+        _medSubLabel(_medicationIdx, intStr, sizeof(intStr));
+        _medLastLabel(_medicationIdx, lstStr, sizeof(lstStr));
+        display.drawNumericSelector(_meds[_medicationIdx].name, _medicationAmount,
+                                    0.5f, 0.0f, 50.0f, _meds[_medicationIdx].unit, _wifiOk,
+                                    intStr[0] ? intStr : nullptr,
+                                    lstStr[0] ? lstStr : nullptr);
+    }
     display.refresh(true);
 }
 
@@ -986,10 +1018,13 @@ static void handleMedicationAmount(BtnEvent btn) {
     if (btn == BTN_UP   && _medicationAmount < 50.0f) _medicationAmount += 0.5f;
     if (btn == BTN_DOWN && _medicationAmount > 0.0f)  _medicationAmount -= 0.5f;
     if (btn == BTN_UP || btn == BTN_DOWN) {
-        char last[20]; _medSubLabel(_medicationIdx, last, sizeof(last));
+        char intStr[20], lstStr[24];
+        _medSubLabel(_medicationIdx, intStr, sizeof(intStr));
+        _medLastLabel(_medicationIdx, lstStr, sizeof(lstStr));
         display.drawNumericSelector(_meds[_medicationIdx].name, _medicationAmount,
                                     0.5f, 0.0f, 50.0f, _meds[_medicationIdx].unit, _wifiOk,
-                                    last[0] ? last : nullptr);
+                                    intStr[0] ? intStr : nullptr,
+                                    lstStr[0] ? lstStr : nullptr);
         display.refresh(); touch(); return;
     }
     if (btn == BTN_MID_LONG) { enterMainMenu(); return; }

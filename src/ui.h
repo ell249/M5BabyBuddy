@@ -28,11 +28,13 @@ public:
     void drawHeader(const char* name, bool wifiOk, int offlineCount = 0);
     void drawMenu(const char* title, const char** items, int count, int selected,
                   bool wifiOk = true, int offlineCount = 0,
-                  const char* subLabel = nullptr);
+                  const char* sub1 = nullptr, const char* sub2 = nullptr);
     void drawTimer(const char* activity, uint32_t elapsedSec, bool wifiOk = true);
     void drawNumericSelector(const char* label, float value, float step,
                              float minVal, float maxVal, const char* unit,
-                             bool wifiOk = true, const char* lastStr = nullptr);
+                             bool wifiOk = true,
+                             const char* hintLeft  = nullptr,
+                             const char* hintRight = nullptr);
 
     struct SummaryRecord {
         int  iconType;    // 0=feeding, 1=diaper, 2=sleep

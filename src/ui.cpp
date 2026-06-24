@@ -124,23 +124,20 @@ void UI::drawHeader(const char* name, bool wifiOk, int offlineCount) {
 // ── Menu — one item per page ──────────────────────────────────────────────────
 
 void UI::drawMenu(const char* title, const char** items, int count, int selected,
-                  bool wifiOk, int offlineCount, const char* subLabel) {
+                  bool wifiOk, int offlineCount, const char* sub1, const char* sub2) {
     if (!_sprite) return;
     drawHeader(title, wifiOk, offlineCount);
 
-    // Reserve SMALL_H+4 at bottom for position indicator
+    // Reserve SMALL_H+4 at bottom for position indicator; centre the whole block
     int availH = DISPLAY_H - CONTENT_Y - SMALL_H - 6;
-    int itemY;
-    if (subLabel && subLabel[0]) {
-        // Centre the name+subLabel block together
-        int blockH = BIG_H + 4 + SMALL_H;
-        itemY = CONTENT_Y + (availH - blockH) / 2;
-        _bigCenter(itemY, items[selected]);
-        _smallCenter(itemY + BIG_H + 4, subLabel);
-    } else {
-        itemY = CONTENT_Y + (availH - BIG_H) / 2;
-        _bigCenter(itemY, items[selected]);
-    }
+    int blockH = BIG_H;
+    if (sub1 && sub1[0]) blockH += 4 + SMALL_H;
+    if (sub2 && sub2[0]) blockH += 2 + SMALL_H;
+    int itemY = CONTENT_Y + (availH - blockH) / 2;
+    _bigCenter(itemY, items[selected]);
+    int nextY = itemY + BIG_H + 4;
+    if (sub1 && sub1[0]) { _smallCenter(nextY, sub1); nextY += SMALL_H + 2; }
+    if (sub2 && sub2[0])   _smallCenter(nextY, sub2);
 
     char pg[8];
     snprintf(pg, sizeof(pg), "%d/%d", selected + 1, count);
@@ -204,7 +201,7 @@ void UI::drawTimer(const char* activity, uint32_t elapsedSec, bool wifiOk) {
 void UI::drawNumericSelector(const char* label, float value,
                               float step, float minVal, float maxVal,
                               const char* unit, bool wifiOk,
-                              const char* lastStr) {
+                              const char* hintLeft, const char* hintRight) {
     if (!_sprite) return;
     drawHeader(label, wifiOk, 0);
 
@@ -216,13 +213,18 @@ void UI::drawNumericSelector(const char* label, float value,
     int y = CONTENT_Y + (availH - HUGE_H) / 2;
     _hugeCenter(y, valBuf);
 
-    char rangeBuf[24];
-    snprintf(rangeBuf, sizeof(rangeBuf), "%.0f-%.0f %s", minVal, maxVal, unit);
-    _small(TEXT_LEFT, DISPLAY_H - SMALL_H - 2, rangeBuf);
-
-    if (lastStr && lastStr[0]) {
-        int lw = _smallWidth(lastStr);
-        _small(DISPLAY_W - lw - TEXT_LEFT, DISPLAY_H - SMALL_H - 2, lastStr);
+    // Left: interval hint when provided, otherwise the numeric range
+    if (hintLeft && hintLeft[0]) {
+        _small(TEXT_LEFT, DISPLAY_H - SMALL_H - 2, hintLeft);
+    } else {
+        char rangeBuf[24];
+        snprintf(rangeBuf, sizeof(rangeBuf), "%.0f-%.0f %s", minVal, maxVal, unit);
+        _small(TEXT_LEFT, DISPLAY_H - SMALL_H - 2, rangeBuf);
+    }
+    // Right: last-given hint
+    if (hintRight && hintRight[0]) {
+        int rw = _smallWidth(hintRight);
+        _small(DISPLAY_W - rw - TEXT_LEFT, DISPLAY_H - SMALL_H - 2, hintRight);
     }
 }
 

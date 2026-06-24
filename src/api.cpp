@@ -404,7 +404,9 @@ int BabyBuddyAPI::fetchStartupData(int childId,
                 strncpy(meds[medCount].name, name, sizeof(meds[0].name) - 1);
                 meds[medCount].amount   = entry["dosage"] | 0.0f;
                 strncpy(meds[medCount].unit, entry["dosage_unit"] | "", sizeof(meds[0].unit) - 1);
-                meds[medCount].lastTime = 0;
+                meds[medCount].lastTime    = 0;
+                meds[medCount].intervalSec = 0;
+
                 const char* tStr = entry["time"] | "";
                 if (tStr[0]) {
                     struct tm tmE = {};
@@ -415,6 +417,32 @@ int BabyBuddyAPI::fetchStartupData(int childId,
                         meds[medCount].lastTime = mktime(&tmE);
                     }
                 }
+
+                // next_dose_interval: string "HH:MM:SS" or null
+                {
+                    uint32_t iv = 0;
+                    JsonVariant ivField = entry["next_dose_interval"];
+                    if (!ivField.isNull()) {
+                        if (ivField.is<const char*>()) {
+                            const char* ivStr = ivField.as<const char*>();
+                            if (ivStr && ivStr[0]) {
+                                int d = 0, h = 0, m = 0, s = 0;
+                                const char* comma = strstr(ivStr, ", ");
+                                if (comma) {
+                                    sscanf(ivStr, "%d day", &d);
+                                    sscanf(comma + 2, "%d:%d:%d", &h, &m, &s);
+                                } else {
+                                    sscanf(ivStr, "%d:%d:%d", &h, &m, &s);
+                                }
+                                iv = (uint32_t)(d * 86400 + h * 3600 + m * 60 + s);
+                            }
+                        } else {
+                            iv = (uint32_t)(ivField.as<float>());  // numeric seconds
+                        }
+                    }
+                    meds[medCount].intervalSec = iv;
+                }
+
                 medCount++;
             }
         }
