@@ -282,10 +282,9 @@ static void startWiFiAsync() {
 // Called from loop() the first time WiFi becomes connected
 static void onWiFiConnected() {
     _wifiOk = true;
-    // NTP has been running since configTzTime() at boot; usually syncs within 1s of WiFi up
-    if (waitNtp(3000)) syncRtcFromSystem();
+    // NTP/RTC sync is deferred to renderSleepScreen() via sntp_get_sync_status() — non-blocking
     if (api.offlineCount() > 0) api.replayOffline();
-    // Fetch child info from API only if not already cached in NVS
+    // Fetch child info only if not cached (first boot without prior WiFi)
     if (_childId <= 0) {
         _childId = api.getChildId();
         if (_childId > 0) {
@@ -294,52 +293,14 @@ static void onWiFiConnected() {
             if (_childName[0] == '\0') strncpy(_childName, "Baby", sizeof(_childName));
         }
     }
-    // Fetch last feed method, last temperature, and recent API medications
-    {
-        BBMedication apiMeds[4];
-        char apiFeedMethod[4] = "";
-        float apiLastTemp = 0.0f;
-        int apiMedCount = api.fetchStartupData(_childId,
-                                               apiFeedMethod, sizeof(apiFeedMethod),
-                                               &apiLastTemp, apiMeds, 4);
-        if (apiFeedMethod[0]) strncpy(_lastFeedMethod, apiFeedMethod, sizeof(_lastFeedMethod) - 1);
-        if (apiLastTemp > 0.0f) _lastTemp = apiLastTemp;
+    // Startup data (feed method, temp, medications) is now refreshed by the timer wakeup
+    // path every 5 minutes in the background — NVS-cached values are used until then.
 
-        Preferences sp;
-        sp.begin("bb_state", false);
-        if (_lastFeedMethod[0]) sp.putString("lastfeed", _lastFeedMethod);
-        if (_lastTemp > 0.0f)   sp.putFloat("lasttemp", _lastTemp);
-        sp.end();
-
-        // Merge API meds into _meds[] — config.h entries take priority, API adds extras
-        for (int i = 0; i < apiMedCount && _medCount < MED_MAX; i++) {
-            bool found = false;
-            for (int j = 0; j < _medCount; j++) {
-                if (strcmp(_meds[j].name, apiMeds[i].name) == 0) {
-                    _meds[j].lastTime    = apiMeds[i].lastTime;
-                    _meds[j].intervalSec = apiMeds[i].intervalSec;
-                    found = true; break;
-                }
-            }
-            if (!found) {
-                strncpy(_meds[_medCount].name, apiMeds[i].name, sizeof(_meds[0].name) - 1);
-                _meds[_medCount].amount      = apiMeds[i].amount;
-                strncpy(_meds[_medCount].unit, apiMeds[i].unit, sizeof(_meds[0].unit) - 1);
-                _meds[_medCount].lastTime    = apiMeds[i].lastTime;
-                _meds[_medCount].intervalSec = apiMeds[i].intervalSec;
-                _medCount++;
-            }
-        }
-        for (int i = 0; i < _medCount; i++) _medicationPtrs[i] = _meds[i].name;
-        _medicationPtrs[_medCount] = "Back";
-        saveMedLastTimes();
-    }
-
-    // Refresh whichever screen shows the WiFi indicator
+    // Flip the WiFi indicator with a partial refresh — avoids a disruptive full clear cycle
     if (_state == ST_MAIN_MENU) {
         display.drawMenu(_childName, MAIN_ITEMS, MAIN_COUNT, _menuSel,
                          _wifiOk, api.offlineCount());
-        display.refresh(true);
+        display.refresh(false);
         touch();
     }
 }
@@ -422,22 +383,24 @@ static int loadRecentRecords(BBRecentRecord* recs) {
     return count;
 }
 
-// ── Deep sleep with summary screen ───────────────────────────────────────────
-static void goToSleep() {
-    _state = ST_SLEEPING;
-    if (_wifiPending) { WiFi.disconnect(true); _wifiPending = false; }
+// ── Sleep screen helpers ──────────────────────────────────────────────────────
 
-    // Give immediate visual feedback before potentially-slow API calls
-    display.drawStatus("...");
-    display.refresh();   // partial update — fast, no clear phase
+static int _buildSleepRecords(BBRecentRecord* recs) {
+    int n = _wifiOk ? api.getRecentRecords(recs, _childId) : 0;
+    if (n > 0) saveRecentRecords(recs, n);
+    else       n = loadRecentRecords(recs);
+    return n;
+}
+
+static void renderSleepScreen() {
+    _state = ST_SLEEPING;
+
+    // Lazy RTC sync: pick up SNTP result without blocking
+    if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED)
+        syncRtcFromSystem();
 
     BBRecentRecord recs[3] = {};
-    int recCount = _wifiOk ? api.getRecentRecords(recs, _childId) : 0;
-    if (recCount > 0) {
-        saveRecentRecords(recs, recCount);   // keep a copy so offline wakeups can show advancing times
-    } else {
-        recCount = loadRecentRecords(recs);  // fall back to cached records; formatAgo uses current RTC
-    }
+    int recCount = _buildSleepRecords(recs);
 
     int batPct = getBatPercent();
     time_t now = time(nullptr);
@@ -472,16 +435,23 @@ static void goToSleep() {
 
     display.drawSummary(_childName, clockBuf, srecs, recCount);
     display.refresh(true);
+}
 
-    // Put the EPD controller into its own deep sleep — latches the image and
-    // powers down the HV supply.  Without this the controller keeps running after
-    // SPI goes quiet and the image degrades.  display.begin() re-inits on wakeup.
+static void enterDeepSleep() {
+    // Latch image and power down EPD HV supply
     M5.M5Ink.deepSleep();
-
     // Wake on MID (GPIO38) press OR after 5-minute timer
     esp_sleep_enable_ext0_wakeup(GPIO_NUM_38, 0);
     esp_sleep_enable_timer_wakeup(5ULL * 60 * 1000000);
     esp_deep_sleep_start();
+}
+
+static void goToSleep() {
+    if (_wifiPending) { WiFi.disconnect(true); _wifiPending = false; }
+    display.drawStatus("...");
+    display.refresh();   // partial — immediate visual feedback before API call
+    renderSleepScreen();
+    enterDeepSleep();
 }
 
 // ── WiFi ──────────────────────────────────────────────────────────────────────
@@ -565,15 +535,95 @@ static void handleBoot() {
     configTzTime(BB_TIMEZONE, NTP_SERVER);
     syncSystemFromRtc();  // clock is immediately correct from RTC, even without WiFi
 
-    // Timer wakeup: silent background refresh — blocking WiFi is fine, user isn't watching
+    // Timer wakeup: background sync — show cached summary immediately, try WiFi briefly
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
         api.begin(BB_BASE_URL, BB_AUTH_TOKEN);
+
+        // Load child identity from NVS only — no blocking HTTP
+        {
+            Preferences p;
+            p.begin("bb_child", true);
+            _childId = p.getInt("id", 0);
+            p.end();
+        }
+        if (BB_CHILD_ID > 0) _childId = BB_CHILD_ID;
         const char* cached = api.getChildName();
         if (cached[0] != '\0') strncpy(_childName, cached, sizeof(_childName) - 1);
-        _childId = BB_CHILD_ID > 0 ? BB_CHILD_ID : api.getChildId();
-        _wifiOk = connectWiFi();
-        if (_wifiOk && waitNtp(5000)) syncRtcFromSystem();
-        goToSleep();
+        if (_childName[0] == '\0') strncpy(_childName, "Baby", sizeof(_childName));
+
+        // Load med timing so overdue "+" markers are correct on cached screen
+        _medCount = 0;
+        for (int i = 0; i < MEDICINE_COUNT && _medCount < MED_MAX; i++) {
+            strncpy(_meds[_medCount].name,   MEDICINE_NAMES[i],   sizeof(_meds[0].name)   - 1);
+            strncpy(_meds[_medCount].unit,   MEDICINE_UNITS[i],   sizeof(_meds[0].unit)   - 1);
+            _meds[_medCount].amount = MEDICINE_AMOUNTS[i];
+            _medCount++;
+        }
+        loadMedLastTimes();
+
+        // Display cached summary immediately — visible before WiFi attempt
+        renderSleepScreen();
+
+        // Try WiFi — 5s max, 100ms polls (was up to 30s blocking)
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+        unsigned long t0 = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - t0 < 5000UL)
+            delay(100);
+
+        if (WiFi.status() == WL_CONNECTED) {
+            _wifiOk = true;
+            if (waitNtp(1000)) syncRtcFromSystem();
+            if (api.offlineCount() > 0) api.replayOffline();
+
+            // Full startup data refresh — user not present, no rush
+            BBMedication apiMeds[4];
+            char apiFeedMethod[4] = "";
+            float apiLastTemp = 0.0f;
+            int apiMedCount = api.fetchStartupData(_childId,
+                                                   apiFeedMethod, sizeof(apiFeedMethod),
+                                                   &apiLastTemp, apiMeds, 4);
+            if (apiFeedMethod[0]) strncpy(_lastFeedMethod, apiFeedMethod, sizeof(_lastFeedMethod) - 1);
+            if (apiLastTemp > 0.0f) _lastTemp = apiLastTemp;
+            {
+                Preferences sp;
+                sp.begin("bb_state", false);
+                if (_lastFeedMethod[0]) sp.putString("lastfeed", _lastFeedMethod);
+                if (_lastTemp > 0.0f)   sp.putFloat("lasttemp", _lastTemp);
+                sp.end();
+            }
+            for (int i = 0; i < apiMedCount && _medCount < MED_MAX; i++) {
+                bool found = false;
+                for (int j = 0; j < _medCount; j++) {
+                    if (strcmp(_meds[j].name, apiMeds[i].name) == 0) {
+                        _meds[j].lastTime    = apiMeds[i].lastTime;
+                        _meds[j].intervalSec = apiMeds[i].intervalSec;
+                        found = true; break;
+                    }
+                }
+                if (!found) {
+                    strncpy(_meds[_medCount].name, apiMeds[i].name, sizeof(_meds[0].name) - 1);
+                    _meds[_medCount].amount      = apiMeds[i].amount;
+                    strncpy(_meds[_medCount].unit, apiMeds[i].unit, sizeof(_meds[0].unit) - 1);
+                    _meds[_medCount].lastTime    = apiMeds[i].lastTime;
+                    _meds[_medCount].intervalSec = apiMeds[i].intervalSec;
+                    _medCount++;
+                }
+            }
+            saveMedLastTimes();
+
+            // Fetch recent records, save to NVS, then re-render with live data
+            BBRecentRecord recs[3] = {};
+            int rc = api.getRecentRecords(recs, _childId);
+            if (rc > 0) saveRecentRecords(recs, rc);
+        }
+
+        // Disconnect before sleeping; renderSleepScreen uses NVS cache
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
+        _wifiOk = false;
+        renderSleepScreen();
+        enterDeepSleep();
         return;
     }
 
