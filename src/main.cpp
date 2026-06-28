@@ -471,20 +471,20 @@ static void enterDeepSleep() {
     M5.Rtc.disableIRQ();
     M5.Rtc.SetAlarmIRQ(5 * 60);
 
-    // Keep GPIO19 (BM8563 INT) and GPIO27 (PWR button) pull-ups alive during deep sleep
-    rtc_gpio_pullup_en(GPIO_NUM_19);
-    rtc_gpio_pulldown_dis(GPIO_NUM_19);
+    // Keep pull-ups alive during deep sleep (both are RTC GPIOs)
     rtc_gpio_pullup_en(GPIO_NUM_27);
     rtc_gpio_pulldown_dis(GPIO_NUM_27);
+    rtc_gpio_pullup_en(GPIO_NUM_19);
+    rtc_gpio_pulldown_dis(GPIO_NUM_19);
 
     // Latch POWER_HOLD_PIN HIGH — keeps device in true deep sleep if the circuit allows it.
     // If the device powers off anyway, the BM8563 cold-boot path in setup() handles it.
     rtc_gpio_hold_en(GPIO_NUM_12);
 
-    // EXT0: GPIO38 MID button (active LOW) — user wakes device for normal UI
+    // EXT0: GPIO27 PWR button (active LOW) — user wakes device for normal UI
     // EXT1: GPIO19 BM8563 INT (active LOW) — scheduled sync wake from deep sleep
-    // Timer: backup if deep sleep holds but BM8563 doesn't reach GPIO19 (belt-and-suspenders)
-    esp_sleep_enable_ext0_wakeup(GPIO_NUM_38, 0);
+    // Timer: 5-min backup if deep sleep holds but BM8563 signal doesn't reach GPIO19
+    esp_sleep_enable_ext0_wakeup(GPIO_NUM_27, 0);
     esp_sleep_enable_ext1_wakeup(1ULL << GPIO_NUM_19, ESP_EXT1_WAKEUP_ALL_LOW);
     esp_sleep_enable_timer_wakeup(5ULL * 60 * 1000000);
     esp_deep_sleep_start();
