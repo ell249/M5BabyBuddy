@@ -463,16 +463,29 @@ static void enterDeepSleep() {
     ledOff();
     // Latch image and power down EPD HV supply
     M5.M5Ink.deepSleep();
-    // Keep PWR button pull-up alive through deep sleep (GPIO27 is an RTC GPIO)
+
+    // Arm BM8563 5-minute countdown timer.
+    // This fires even if the device fully powers off — the BM8563 has its own clock domain.
+    // When it fires, INT (GPIO19) goes LOW, pulling PWR_TRIG LOW through the hardware
+    // power circuit to turn the device back on.
+    M5.Rtc.disableIRQ();
+    M5.Rtc.SetAlarmIRQ(5 * 60);
+
+    // Keep GPIO19 (BM8563 INT) and GPIO27 (PWR button) pull-ups alive during deep sleep
+    rtc_gpio_pullup_en(GPIO_NUM_19);
+    rtc_gpio_pulldown_dis(GPIO_NUM_19);
     rtc_gpio_pullup_en(GPIO_NUM_27);
     rtc_gpio_pulldown_dis(GPIO_NUM_27);
-    // Latch POWER_HOLD_PIN HIGH so the power circuit stays on while the ESP32 sleeps.
-    // Without this the digital core going offline lets GPIO12 drift LOW, which releases
-    // the power latch and cuts power — killing the RTC timer before it can fire.
+
+    // Latch POWER_HOLD_PIN HIGH — keeps device in true deep sleep if the circuit allows it.
+    // If the device powers off anyway, the BM8563 cold-boot path in setup() handles it.
     rtc_gpio_hold_en(GPIO_NUM_12);
-    // Wake on MID (GPIO38) or PWR (GPIO27) button press, or after 5-minute timer
+
+    // EXT0: GPIO38 MID button (active LOW) — user wakes device for normal UI
+    // EXT1: GPIO19 BM8563 INT (active LOW) — scheduled sync wake from deep sleep
+    // Timer: backup if deep sleep holds but BM8563 doesn't reach GPIO19 (belt-and-suspenders)
     esp_sleep_enable_ext0_wakeup(GPIO_NUM_38, 0);
-    esp_sleep_enable_ext1_wakeup(1ULL << GPIO_NUM_27, ESP_EXT1_WAKEUP_ALL_LOW);
+    esp_sleep_enable_ext1_wakeup(1ULL << GPIO_NUM_19, ESP_EXT1_WAKEUP_ALL_LOW);
     esp_sleep_enable_timer_wakeup(5ULL * 60 * 1000000);
     esp_deep_sleep_start();
 }
@@ -557,7 +570,7 @@ static void offlineLog(const char* path, const char* body, const char* successMs
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
-static void handleBoot() {
+static void handleBoot(bool rtcWake) {
     display.begin();
     pinMode(PWR_BTN_PIN, INPUT_PULLUP);
 
@@ -566,8 +579,12 @@ static void handleBoot() {
     configTzTime(BB_TIMEZONE, NTP_SERVER);
     syncSystemFromRtc();  // clock is immediately correct from RTC, even without WiFi
 
-    // Timer wakeup: background sync — show cached summary immediately, try WiFi briefly
-    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+    // Scheduled background-sync wakeup: either the BM8563 countdown fired (rtcWake covers
+    // both a true power-off cold boot and an EXT1 deep-sleep resume, because GPIO19 is still
+    // LOW until M5.begin() cleared it above) or the ESP32 internal timer fired as backup.
+    bool scheduledWake = rtcWake ||
+                         (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER);
+    if (scheduledWake) {
         api.begin(BB_BASE_URL, BB_AUTH_TOKEN);
         ledFlash();  // flash = searching for WiFi
 
@@ -1199,12 +1216,17 @@ static void handleTempSave() {
 // ── Arduino entry points ──────────────────────────────────────────────────────
 void setup() {
     // Release the RTC hold on POWER_HOLD_PIN so M5.begin() can drive it normally.
-    // On a fresh power-on this is a no-op; on a deep-sleep wakeup it removes the latch
-    // we set in enterDeepSleep() so subsequent digitalWrite() calls work.
     rtc_gpio_hold_dis(GPIO_NUM_12);
+
+    // Read BM8563 INT (GPIO19, active-LOW open-drain) BEFORE M5.begin().
+    // M5.begin() → rtc.begin() → disableIRQ() clears the INT flag, so this is the
+    // only moment we can tell whether the BM8563 countdown timer fired.
+    pinMode(19, INPUT_PULLUP);
+    bool rtcAlarmFired = (digitalRead(19) == LOW);
+
     M5.begin();
     Serial.begin(115200);
-    handleBoot();
+    handleBoot(rtcAlarmFired);
 }
 
 void loop() {
