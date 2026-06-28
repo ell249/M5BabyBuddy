@@ -7,6 +7,7 @@
 #include <esp_sleep.h>
 #include <esp_sntp.h>
 #include <driver/adc.h>
+#include <driver/rtc_io.h>
 #include <esp_adc_cal.h>
 
 #include "config.h"
@@ -154,6 +155,26 @@ static const char* SETTINGS_ITEMS[] = {
 };
 static const int SETTINGS_COUNT = 6;
 
+// ── Status LED (GPIO10 / LED_EXT_PIN, active LOW) ────────────────────────────
+static bool          _ledFlashing = false;
+static bool          _ledState    = false;
+static unsigned long _ledToggleMs = 0;
+
+static void ledOff()   { _ledFlashing = false; digitalWrite(LED_EXT_PIN, HIGH); _ledState = false; }
+static void ledSolid() { _ledFlashing = false; digitalWrite(LED_EXT_PIN, LOW);  _ledState = true;  }
+static void ledFlash() {
+    _ledFlashing = true; _ledState = true;
+    _ledToggleMs = millis(); digitalWrite(LED_EXT_PIN, LOW);
+}
+static void ledUpdate() {
+    if (!_ledFlashing) return;
+    if (millis() - _ledToggleMs >= 300UL) {
+        _ledState = !_ledState;
+        digitalWrite(LED_EXT_PIN, _ledState ? LOW : HIGH);
+        _ledToggleMs = millis();
+    }
+}
+
 // ── Button reading ────────────────────────────────────────────────────────────
 static const int     PWR_BTN_PIN    = 27;
 static unsigned long _midPressStart = 0;
@@ -282,6 +303,7 @@ static void startWiFiAsync() {
 // Called from loop() the first time WiFi becomes connected
 static void onWiFiConnected() {
     _wifiOk = true;
+    ledSolid();
     // NTP/RTC sync is deferred to renderSleepScreen() via sntp_get_sync_status() — non-blocking
     if (api.offlineCount() > 0) api.replayOffline();
     // Fetch child info only if not cached (first boot without prior WiFi)
@@ -438,10 +460,19 @@ static void renderSleepScreen() {
 }
 
 static void enterDeepSleep() {
+    ledOff();
     // Latch image and power down EPD HV supply
     M5.M5Ink.deepSleep();
-    // Wake on MID (GPIO38) press OR after 5-minute timer
+    // Keep PWR button pull-up alive through deep sleep (GPIO27 is an RTC GPIO)
+    rtc_gpio_pullup_en(GPIO_NUM_27);
+    rtc_gpio_pulldown_dis(GPIO_NUM_27);
+    // Latch POWER_HOLD_PIN HIGH so the power circuit stays on while the ESP32 sleeps.
+    // Without this the digital core going offline lets GPIO12 drift LOW, which releases
+    // the power latch and cuts power — killing the RTC timer before it can fire.
+    rtc_gpio_hold_en(GPIO_NUM_12);
+    // Wake on MID (GPIO38) or PWR (GPIO27) button press, or after 5-minute timer
     esp_sleep_enable_ext0_wakeup(GPIO_NUM_38, 0);
+    esp_sleep_enable_ext1_wakeup(1ULL << GPIO_NUM_27, ESP_EXT1_WAKEUP_ALL_LOW);
     esp_sleep_enable_timer_wakeup(5ULL * 60 * 1000000);
     esp_deep_sleep_start();
 }
@@ -538,6 +569,7 @@ static void handleBoot() {
     // Timer wakeup: background sync — show cached summary immediately, try WiFi briefly
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
         api.begin(BB_BASE_URL, BB_AUTH_TOKEN);
+        ledFlash();  // flash = searching for WiFi
 
         // Load child identity from NVS only — no blocking HTTP
         {
@@ -568,11 +600,14 @@ static void handleBoot() {
         WiFi.mode(WIFI_STA);
         WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
         unsigned long t0 = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - t0 < 5000UL)
+        while (WiFi.status() != WL_CONNECTED && millis() - t0 < 5000UL) {
             delay(100);
+            ledUpdate();
+        }
 
         if (WiFi.status() == WL_CONNECTED) {
             _wifiOk = true;
+            ledSolid();  // solid = WiFi connected
             if (waitNtp(1000)) syncRtcFromSystem();
             if (api.offlineCount() > 0) api.replayOffline();
 
@@ -657,6 +692,7 @@ static void handleBoot() {
     if (_childName[0] == '\0') strncpy(_childName, "Baby", sizeof(_childName));
 
     startWiFiAsync();  // connect in background; onWiFiConnected() fires from loop()
+    ledFlash();        // flash = searching for WiFi; ledSolid() fires in onWiFiConnected()
 
     loadTimer();
     if (_timer.valid) {
@@ -1162,12 +1198,18 @@ static void handleTempSave() {
 
 // ── Arduino entry points ──────────────────────────────────────────────────────
 void setup() {
+    // Release the RTC hold on POWER_HOLD_PIN so M5.begin() can drive it normally.
+    // On a fresh power-on this is a no-op; on a deep-sleep wakeup it removes the latch
+    // we set in enterDeepSleep() so subsequent digitalWrite() calls work.
+    rtc_gpio_hold_dis(GPIO_NUM_12);
     M5.begin();
     Serial.begin(115200);
     handleBoot();
 }
 
 void loop() {
+    ledUpdate();
+
     // Background WiFi — poll until connected or timed out
     if (_wifiPending) {
         if (WiFi.status() == WL_CONNECTED) {
